@@ -2112,7 +2112,7 @@ internal struct _BitMap {
 
   @warn_unused_result
   internal static func wordsFor(_ bitCount: Int) -> Int {
-    return bitCount + Int._sizeInBytes - 1 / Int._sizeInBytes
+    return (bitCount + Int._sizeInBytes - 1) / Int._sizeInBytes
   }
 
   internal init(storage: UnsafeMutablePointer<UInt>, bitCount: Int) {
