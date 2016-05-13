@@ -2124,10 +2124,7 @@ internal struct _BitMap {
   }
 
   internal var numberOfWords: Int {
-    @warn_unused_result
-    get {
-      return _BitMap.wordsFor(bitCount)
-    }
+    return _BitMap.wordsFor(bitCount)
   }
 
   internal func initializeToZero() {
@@ -2220,10 +2217,7 @@ final internal class _Native${Self}StorageImpl<${TypeParameters}> :
 %end
 
   internal var buffer: BufferPointer {
-    @warn_unused_result
-    get {
-      return BufferPointer(self)
-    }
+    return BufferPointer(self)
   }
 
   // All underscored functions are unsafe and need a _fixLifetime in the caller.
@@ -2238,10 +2232,7 @@ final internal class _Native${Self}StorageImpl<${TypeParameters}> :
 
   @_versioned
   internal var _capacity: Int {
-    @warn_unused_result
-    get {
-      return _body.capacity
-    }
+    return _body.capacity
   }
 
   @_versioned
@@ -2249,17 +2240,13 @@ final internal class _Native${Self}StorageImpl<${TypeParameters}> :
     set {
       _body.count = newValue
     }
-    @warn_unused_result
     get {
       return _body.count
     }
   }
 
   internal var _maxLoadFactorInverse : Double {
-    @warn_unused_result
-    get {
-      return _body.maxLoadFactorInverse
-    }
+    return _body.maxLoadFactorInverse
   }
 
   internal
@@ -2308,7 +2295,7 @@ final internal class _Native${Self}StorageImpl<${TypeParameters}> :
     let requiredCapacity =
       bytesForBitMap(capacity: capacity) + bytesForKeys(capacity: capacity)
 %if Self == 'Dictionary':
-        + bytesForValues(capacity: capacity)
+      + bytesForValues(capacity: capacity)
 %end
 
     let r = super.create(minimumCapacity: requiredCapacity) { _ in
@@ -2383,8 +2370,8 @@ struct _Native${Self}Storage<${TypeParametersDecl}> :
   internal init(capacity: Int) {
     buffer = StorageImpl.create(capacity: capacity)
     initializedEntries = _BitMap(
-        storage: buffer._initializedHashtableEntriesBitMapStorage,
-        bitCount: capacity)
+      storage: buffer._initializedHashtableEntriesBitMapStorage,
+      bitCount: capacity)
     keys = buffer._keys
 %if Self == 'Dictionary':
     values = buffer._values
@@ -2407,18 +2394,14 @@ struct _Native${Self}Storage<${TypeParametersDecl}> :
   @_transparent
   public // @testable
   var capacity: Int {
-    @warn_unused_result
-    get {
-      let result = buffer._capacity
-      _fixLifetime(buffer)
-      return result
-    }
+    let result = buffer._capacity
+    _fixLifetime(buffer)
+    return result
   }
 
   @_versioned
   @_transparent
   internal var count: Int {
-    @warn_unused_result
     get {
       let result = buffer._count
       _fixLifetime(buffer)
@@ -2432,12 +2415,9 @@ struct _Native${Self}Storage<${TypeParametersDecl}> :
 
   @_transparent
   internal var maxLoadFactorInverse: Double {
-    @warn_unused_result
-    get {
-      let result = buffer._maxLoadFactorInverse
-      _fixLifetime(buffer)
-      return result
-    }
+    let result = buffer._maxLoadFactorInverse
+    _fixLifetime(buffer)
+    return result
   }
 
   @_versioned
@@ -2815,7 +2795,6 @@ internal struct _BridgedNative${Self}Storage {
   internal let values: UnsafeMutablePointer<AnyObject>
 %end
 
-
   internal init(buffer: StorageImpl) {
     self.buffer = buffer
     initializedEntries = _BitMap(
@@ -2830,11 +2809,9 @@ internal struct _BridgedNative${Self}Storage {
 
   @_transparent
   internal var capacity: Int {
-    get {
-      let result = buffer._capacity
-      _fixLifetime(buffer)
-      return result
-    }
+    let result = buffer._capacity
+    _fixLifetime(buffer)
+    return result
   }
 
   @_versioned
