@@ -81,6 +81,21 @@ internal func _roundUp(_ offset: Int, toAlignment alignment: Int) -> Int {
   return x & ~(alignment &- 1)
 }
 
+@_versioned
+@warn_unused_result
+internal func _roundUp<T, DestinationType>(
+  _ pointer: UnsafeMutablePointer<T>,
+  toAlignmentOf destinationType: DestinationType.Type
+) -> UnsafeMutablePointer<DestinationType> {
+  // Note: unsafe unwrap is safe because this operation can only increase the
+  // value, and can not produce a null pointer.
+  return UnsafeMutablePointer<DestinationType>(
+    bitPattern: _roundUp(
+      Int(bitPattern: pointer),
+      toAlignment: alignof(DestinationType))
+  ).unsafelyUnwrapped
+}
+
 /// Returns a tri-state of 0 = no, 1 = yes, 2 = maybe.
 @_transparent
 @warn_unused_result
