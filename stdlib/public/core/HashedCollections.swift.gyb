@@ -2114,7 +2114,7 @@ internal struct _BitMap {
   }
 
   @warn_unused_result
-  internal static func wordsFor(_ bitCount: Int) -> Int {
+  internal static func sizeInWords(forCapacity bitCount: Int) -> Int {
     return bitCount + Int._sizeInBytes - 1 / Int._sizeInBytes
   }
 
@@ -2124,7 +2124,7 @@ internal struct _BitMap {
   }
 
   internal var numberOfWords: Int {
-    return _BitMap.wordsFor(bitCount)
+    return _BitMap.sizeInWords(forCapacity: bitCount)
   }
 
   internal func initializeToZero() {
@@ -2188,7 +2188,7 @@ final internal class _Native${Self}StorageImpl<${TypeParameters}> :
   /// padding to align the start to word alignment.
   @warn_unused_result
   internal static func bytesForBitMap(capacity: Int) -> Int {
-    let numWords = _BitMap.wordsFor(capacity)
+    let numWords = _BitMap.sizeInWords(forCapacity: capacity)
     return numWords * strideof(UInt) + alignof(UInt)
   }
 
@@ -2254,7 +2254,7 @@ final internal class _Native${Self}StorageImpl<${TypeParameters}> :
 
   internal var _keys: UnsafeMutablePointer<Key> {
     let bitMapSizeInBytes =
-      _unsafeMultiply(_BitMap.wordsFor(_capacity), strideof(UInt))
+      _unsafeMultiply(_BitMap.sizeInWords(forCapacity: _capacity), strideof(UInt))
     let start =
       UnsafeMutablePointer<UInt8>(_initializedHashtableEntriesBitMapStorage)
       + bitMapSizeInBytes
