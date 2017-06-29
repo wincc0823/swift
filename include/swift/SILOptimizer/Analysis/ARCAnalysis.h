@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,6 +16,10 @@
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILValue.h"
 #include "swift/SIL/SILBasicBlock.h"
+#include "swift/SILOptimizer/Analysis/AliasAnalysis.h"
+#include "swift/SILOptimizer/Analysis/PostOrderAnalysis.h"
+#include "swift/SILOptimizer/Analysis/RCIdentityAnalysis.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SetVector.h"
@@ -35,6 +39,11 @@ class SILFunction;
 } // end namespace swift
 
 namespace swift {
+/// Return true if this is a retain instruction.
+bool isRetainInstruction(SILInstruction *II);
+
+/// Return true if this is a release instruction.
+bool isReleaseInstruction(SILInstruction *II);
 
 using RetainList = llvm::SmallVector<SILInstruction *, 1>;
 using ReleaseList = llvm::SmallVector<SILInstruction *, 1>;
@@ -187,7 +196,11 @@ private:
   SILFunction *F;
   RCIdentityFunctionInfo *RCFI;
   ExitKind Kind;
+  ArrayRef<SILArgumentConvention> ArgumentConventions;
   llvm::SmallMapVector<SILArgument *, ReleaseList, 8> ArgInstMap;
+
+  /// Set to true if we found some releases but not all for the argument.
+  llvm::DenseSet<SILArgument *> FoundSomeReleases;
 
   /// Eventually this will be used in place of HasBlock.
   SILBasicBlock *ProcessedBlock;
@@ -209,6 +222,10 @@ private:
   /// arguments. 
   void collectMatchingReleases(SILBasicBlock *BB);
 
+  /// Walk the function and find all the destroy_addr instructions that match
+  /// to function arguments. 
+  void collectMatchingDestroyAddresses(SILBasicBlock *BB);
+
   /// For every argument in the function, check to see whether all epilogue
   /// releases are found. Clear all releases for the argument if not all 
   /// epilogue releases are found.
@@ -216,9 +233,12 @@ private:
 
 public:
   /// Finds matching releases in the return block of the function \p F.
-  ConsumedArgToEpilogueReleaseMatcher(RCIdentityFunctionInfo *RCFI,
-                                      SILFunction *F,
-                                      ExitKind Kind = ExitKind::Return);
+  ConsumedArgToEpilogueReleaseMatcher(
+      RCIdentityFunctionInfo *RCFI,
+      SILFunction *F,
+      ArrayRef<SILArgumentConvention> ArgumentConventions =
+          {SILArgumentConvention::Direct_Owned},
+      ExitKind Kind = ExitKind::Return);
 
   /// Finds matching releases in the provided block \p BB.
   void findMatchingReleases(SILBasicBlock *BB);
@@ -238,6 +258,12 @@ public:
         return true;
     }
     return false;
+  }
+
+  /// Return true if we've found some epilogue releases for the argument
+  /// but not all.
+  bool hasSomeReleasesForArgument(SILArgument *Arg) {
+    return FoundSomeReleases.find(Arg) != FoundSomeReleases.end();
   }
 
   bool isSingleRelease(SILArgument *Arg) const {
@@ -357,7 +383,7 @@ getSingleUnsafeGuaranteedValueResult(BuiltinInst *UnsafeGuaranteedInst);
 /// "unsafeGuaranteed"'s token.
 BuiltinInst *getUnsafeGuaranteedEndUser(SILInstruction *UnsafeGuaranteedToken);
 
-/// Walk backwards from an unsafeGuaranteedEnd builtin instruction looking for a
+/// Walk forwards from an unsafeGuaranteedEnd builtin instruction looking for a
 /// release on the reference returned by the matching unsafeGuaranteed builtin
 /// ignoring releases on the way.
 /// Return nullptr if no release is found.
@@ -365,11 +391,10 @@ BuiltinInst *getUnsafeGuaranteedEndUser(SILInstruction *UnsafeGuaranteedToken);
 ///    %4 = builtin "unsafeGuaranteed"<Foo>(%0 : $Foo) : $(Foo, Builtin.Int8)
 ///    %5 = tuple_extract %4 : $(Foo, Builtin.Int8), 0
 ///    %6 = tuple_extract %4 : $(Foo, Builtin.Int8), 1
-///    strong_release %5 : $Foo // <-- Matching release.
-///    strong_release %6 : $Foo // Ignore.
 ///    %12 = builtin "unsafeGuaranteedEnd"(%6 : $Builtin.Int8) : $()
+///    strong_release %5 : $Foo // <-- Matching release.
 ///
-/// Alternatively, look for the release after the unsafeGuaranteedEnd.
+/// Alternatively, look for the release before the unsafeGuaranteedEnd.
 SILInstruction *findReleaseToMatchUnsafeGuaranteedValue(
     SILInstruction *UnsafeGuaranteedEndI, SILInstruction *UnsafeGuaranteedI,
     SILValue UnsafeGuaranteedValue, SILBasicBlock &BB,

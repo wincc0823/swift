@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 // This file supports performing target-specific remote reflection tests
@@ -17,6 +17,7 @@
 #define MAX(a,b) (((a)>(b))?(a):(b))
 
 #include "swift/SwiftRemoteMirror/SwiftRemoteMirror.h"
+#include "swift/Demangling/ManglingMacros.h"
 #include "messages.h"
 #include "overrides.h"
 
@@ -51,6 +52,11 @@ typedef struct RemoteReflectionInfo {
 } RemoteReflectionInfo;
 
 static void errorAndExit(const char *message) {
+  fprintf(stderr, "%s\n", message);
+  abort();
+}
+
+static void errnoAndExit(const char *message) {
   fprintf(stderr, "%s: %s\n", message, strerror(errno));
   abort();
 }
@@ -165,18 +171,21 @@ void PipeMemoryReader_collectBytesFromPipe(const PipeMemoryReader *Reader,
   int ReadFD = PipeMemoryReader_getParentReadFD(Reader);
   while (Size) {
     int bytesRead = read(ReadFD, Dest, Size);
-    if (bytesRead == -EINTR)
-      continue;
-    if (bytesRead <= 0)
-      errorAndExit("collectBytesFromPipe");
+    if (bytesRead < 0)
+      if (errno == EINTR)
+        continue;
+      else
+        errnoAndExit("collectBytesFromPipe");
+    else if (bytesRead == 0)
+      errorAndExit("collectBytesFromPipe: Unexpected end of file");
     Size -= bytesRead;
     Dest += bytesRead;
   }
 }
 
 static
-int PipeMemoryReader_readBytes(void *Context,
-                               addr_t Address, void *Dest, uint64_t Size) {
+int PipeMemoryReader_readBytes(void *Context, swift_addr_t Address, void *Dest,
+                               uint64_t Size) {
   const PipeMemoryReader *Reader = (const PipeMemoryReader *)Context;
   uintptr_t TargetAddress = Address;
   size_t TargetSize = (size_t)Size;
@@ -189,8 +198,9 @@ int PipeMemoryReader_readBytes(void *Context,
 }
 
 static
-addr_t PipeMemoryReader_getSymbolAddress(void *Context, const char *SymbolName,
-                                         uint64_t Length) {
+swift_addr_t PipeMemoryReader_getSymbolAddress(void *Context,
+                                               const char *SymbolName,
+                                               uint64_t Length) {
   const PipeMemoryReader *Reader = (const PipeMemoryReader *)Context;
   uintptr_t Address = 0;
   int WriteFD = PipeMemoryReader_getParentWriteFD(Reader);
@@ -231,9 +241,9 @@ static
 PipeMemoryReader createPipeMemoryReader() {
   PipeMemoryReader Reader;
   if (pipe(Reader.to_child))
-    errorAndExit("Couldn't create pipes to child process");
+    errnoAndExit("Couldn't create pipes to child process");
   if (pipe(Reader.from_child))
-    errorAndExit("Couldn't create pipes from child process");
+    errnoAndExit("Couldn't create pipes from child process");
   return Reader;
 }
 
@@ -264,7 +274,7 @@ PipeMemoryReader_receiveReflectionInfo(SwiftReflectionContextRef RC,
   RemoteReflectionInfo *RemoteInfos = calloc(NumReflectionInfos,
                                              sizeof(RemoteReflectionInfo));
   if (RemoteInfos == NULL)
-    errorAndExit("malloc failed");
+    errnoAndExit("malloc failed");
 
   for (size_t i = 0; i < NumReflectionInfos; ++i) {
     RemoteInfos[i] = makeRemoteReflectionInfo(
@@ -306,7 +316,7 @@ PipeMemoryReader_receiveReflectionInfo(SwiftReflectionContextRef RC,
   free(RemoteInfos);
 }
 
-uint64_t PipeMemoryReader_getStringLength(void *Context, addr_t Address) {
+uint64_t PipeMemoryReader_getStringLength(void *Context, swift_addr_t Address) {
   const PipeMemoryReader *Reader = (const PipeMemoryReader *)Context;
   int WriteFD = PipeMemoryReader_getParentWriteFD(Reader);
   uintptr_t TargetAddress = (uintptr_t)Address;
@@ -356,7 +366,7 @@ int reflectExistential(SwiftReflectionContextRef RC,
          instance);
 
   swift_typeref_t InstanceTypeRef;
-  addr_t StartOfInstanceData = 0;
+  swift_addr_t StartOfInstanceData = 0;
 
   if (!swift_reflection_projectExistential(RC, instance, MockExistentialTR,
                                            &InstanceTypeRef,
@@ -384,8 +394,7 @@ int doDumpHeapInstance(const char *BinaryFilename) {
   pid_t pid = _fork();
   switch (pid) {
     case -1:
-      errorAndExit("Couldn't fork child process");
-      exit(EXIT_FAILURE);
+      errnoAndExit("Couldn't fork child process");
     case 0: { // Child:
       close(PipeMemoryReader_getParentWriteFD(&Pipe));
       close(PipeMemoryReader_getParentReadFD(&Pipe));
@@ -420,8 +429,10 @@ int doDumpHeapInstance(const char *BinaryFilename) {
             return EXIT_SUCCESS;
           break;
         case Existential: {
+          static const char Name[] = MANGLING_PREFIX_STR "ypD";
           swift_typeref_t AnyTR
-            = swift_reflection_typeRefForMangledTypeName(RC, "_TtP_", 5);
+            = swift_reflection_typeRefForMangledTypeName(RC,
+              Name, sizeof(Name)-1);
 
           printf("Reflecting an existential.\n");
           if (!reflectExistential(RC, Pipe, AnyTR))
@@ -429,9 +440,10 @@ int doDumpHeapInstance(const char *BinaryFilename) {
           break;
         }
         case ErrorExistential: {
+          static const char ErrorName[] = MANGLING_PREFIX_STR "s5Error_pD";
           swift_typeref_t ErrorTR
             = swift_reflection_typeRefForMangledTypeName(RC,
-              "_TtPs13ErrorProtocol_", 21);
+              ErrorName, sizeof(ErrorName)-1);
           printf("Reflecting an error existential.\n");
           if (!reflectExistential(RC, Pipe, ErrorTR))
             return EXIT_SUCCESS;
@@ -463,6 +475,9 @@ int main(int argc, char *argv[]) {
     printUsageAndExit();
 
   const char *BinaryFilename = argv[1];
+
+  uint16_t Version = swift_reflection_getSupportedMetadataVersion();
+  printf("Metadata version: %u\n", Version);
 
   return doDumpHeapInstance(BinaryFilename);
 }

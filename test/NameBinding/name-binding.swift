@@ -1,4 +1,8 @@
-// RUN: %target-swift-frontend -parse %s -module-name themodule -enable-source-import -I %S/../decl/enum -sdk "" -verify -show-diagnostics-after-fatal
+// RUN: %target-swift-frontend -typecheck %s -module-name themodule -enable-source-import -I %S/../decl/enum -sdk "" -verify -show-diagnostics-after-fatal -verify-ignore-unknown
+
+// -verify-ignore-unknown is for
+// <unknown>:0: error: unexpected note produced: did you forget to set an SDK using -sdk or SDKROOT?
+// <unknown>:0: error: unexpected note produced: use "xcrun swiftc" to select the default macOS SDK installed with Xcode
 
 import Swift
 import nonexistentimport  // expected-error {{no such module 'nonexistentimport'}}
@@ -100,9 +104,11 @@ func func3() {
 
 struct a_struct { var x : Int }
 
-infix operator *** {
-  associativity left
-  precedence 97
+infix operator *** : Starry
+precedencegroup Starry {
+  associativity: left
+  higherThan: AssignmentPrecedence
+  lowerThan: TernaryPrecedence
 }
 
 func ***(lhs: Int, rhs: Int) -> Int {
@@ -170,11 +176,11 @@ var qualifiedvalue : Int = themodule.importedtype
 var qualifiedtype : themodule.x_ty = 5
 
 
-prefix operator +++ {}
-postfix operator +++ {}
+prefix operator +++
+postfix operator +++
 
-prefix operator ++ {}
-postfix operator ++ {}
+prefix operator ++
+postfix operator ++
 
 prefix func +++(a: inout Int) { a += 2 }
 postfix func +++(a: inout Int) { a += 2 }
@@ -225,7 +231,7 @@ struct Matrix4<T: FloatingPoint> {
 func r19558785() {
   let b = 10
   for b in 0...b {
-    b
+    _ = b
   }
 }
 

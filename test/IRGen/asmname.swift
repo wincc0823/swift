@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend %s -emit-ir | FileCheck %s
+// RUN: %target-swift-frontend -assume-parsing-unqualified-ownership-sil %s -emit-ir | %FileCheck %s
 
 // REQUIRES: CPU=i386_or_x86_64
 
@@ -6,4 +6,4 @@
 
 atan2test(0.0, 0.0)
 
-// CHECK: call double @atan2(double {{.*}}, double {{.*}})
+// CHECK: call swiftcc double @atan2(double {{.*}}, double {{.*}})

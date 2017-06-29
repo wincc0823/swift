@@ -1,9 +1,10 @@
 // RUN: %target-run-simple-swift
 // REQUIRES: executable_test
+// UNSUPPORTED: nonatomic_rc
 
 import StdlibUnittest
 
-let iterations = 1_000
+let iterations = 100
 
 class Thing {}
 
@@ -15,7 +16,7 @@ class WBox<T: AnyObject> {
 
 class WeakReferenceRaceData {
   let closure: () -> Void
-  init(_ closure: () -> Void) {
+  init(_ closure: @escaping () -> Void) {
     self.closure = closure
   }
 }

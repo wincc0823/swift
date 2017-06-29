@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -431,9 +431,8 @@ private:
 
     SmallVector<OmissionTypeName, 8> paramTypeNames;
     for (auto param : params) {
-      paramTypeNames.push_back(
-          ClangImporter::Implementation::getClangTypeNameForOmission(
-              clangSema.getASTContext(), param->getType()));
+      paramTypeNames.push_back(getClangTypeNameForOmission(
+          clangSema.getASTContext(), param->getType()));
     }
 
     auto humbleBaseName = getHumbleIdentifier(baseName);
@@ -472,7 +471,7 @@ private:
               typedefType->getDecl()->getCanonicalDecl())) {
         if (pointeeInfo.isRecord() || pointeeInfo.isTypedef())
           return {typedefType->getDecl()->getCanonicalDecl()};
-        assert(pointeeInfo.isConstVoid() && "no other type");
+        assert(pointeeInfo.isVoid() && "no other type");
         return {};
       }
       qt = qt.getSingleStepDesugaredType(clangSema.getASTContext());
@@ -498,13 +497,12 @@ private:
     return {};
   }
 };
-}
+} // end anonymous namespace
 
 static StringRef getTypeName(clang::QualType qt) {
   if (auto typedefTy = qt->getAs<clang::TypedefType>()) {
     // Check for a CF type name (drop the "Ref")
-    auto cfName = ClangImporter::Implementation::getCFTypeName(
-        typedefTy->getDecl()->getCanonicalDecl());
+    auto cfName = getCFTypeName(typedefTy->getDecl()->getCanonicalDecl());
     if (cfName != StringRef())
       return cfName;
   }
@@ -664,11 +662,11 @@ bool IAMInference::validToImportAsProperty(
     // as a getter with no setter, or we cannot be a property
     if (isGet) {
       pairedAccessor = nullptr;
-      return true;
+      setterDecl = nullptr;
+    } else  {
+      // This is set-only as far as we're concerned
+      return false;
     }
-
-    // This is set-only as far as we're concerned
-    return false;
   }
 
   if (!selfIndex)

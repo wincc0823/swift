@@ -2,18 +2,18 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "arc-sequence-opts"
+
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "ARCSequenceOpts.h"
-#include "swift/Basic/Fallthrough.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILVisitor.h"
 #include "swift/SILOptimizer/Utils/Local.h"
@@ -21,6 +21,7 @@
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Analysis/ARCAnalysis.h"
 #include "swift/SILOptimizer/Analysis/AliasAnalysis.h"
+#include "swift/SILOptimizer/Analysis/EpilogueARCAnalysis.h"
 #include "swift/SILOptimizer/Analysis/ProgramTerminationAnalysis.h"
 #include "swift/SILOptimizer/Analysis/PostOrderAnalysis.h"
 #include "swift/SILOptimizer/Analysis/RCIdentityAnalysis.h"
@@ -36,47 +37,13 @@
 
 using namespace swift;
 
-STATISTIC(NumRefCountOpsMoved, "Total number of increments moved");
 STATISTIC(NumRefCountOpsRemoved, "Total number of increments removed");
 
-llvm::cl::opt<bool> EnableLoopARC("enable-loop-arc", llvm::cl::init(true));
+llvm::cl::opt<bool> EnableLoopARC("enable-loop-arc", llvm::cl::init(false));
 
 //===----------------------------------------------------------------------===//
 //                                Code Motion
 //===----------------------------------------------------------------------===//
-
-/// Creates an increment on \p Ptr at insertion point \p InsertPt that creates a
-/// strong_retain if \p Ptr has reference semantics itself or a retain_value if
-/// \p Ptr is a non-trivial value without reference-semantics.
-static SILInstruction *createIncrement(SILValue Ptr, SILInstruction *InsertPt) {
-  // Set up the builder we use to insert at our insertion point.
-  SILBuilder B(InsertPt);
-  auto Loc = RegularLocation(SourceLoc());
-
-  // If Ptr is refcounted itself, create the strong_retain and
-  // return.
-  if (Ptr->getType().isReferenceCounted(B.getModule()))
-    return B.createStrongRetain(Loc, Ptr, Atomicity::Atomic);
-
-  // Otherwise, create the retain_value.
-  return B.createRetainValue(Loc, Ptr, Atomicity::Atomic);
-}
-
-/// Creates a decrement on \p Ptr at insertion point \p InsertPt that creates a
-/// strong_release if \p Ptr has reference semantics itself or a release_value
-/// if \p Ptr is a non-trivial value without reference-semantics.
-static SILInstruction *createDecrement(SILValue Ptr, SILInstruction *InsertPt) {
-  // Setup the builder we will use to insert at our insertion point.
-  SILBuilder B(InsertPt);
-  auto Loc = RegularLocation(SourceLoc());
-
-  // If Ptr has reference semantics itself, create a strong_release.
-  if (Ptr->getType().isReferenceCounted(B.getModule()))
-    return B.createStrongRelease(Loc, Ptr, Atomicity::Atomic);
-
-  // Otherwise create a release value.
-  return B.createReleaseValue(Loc, Ptr, Atomicity::Atomic);
-}
 
 // This routine takes in the ARCMatchingSet \p MatchSet and inserts new
 // increments, decrements at the insertion points and adds the old increment,
@@ -86,39 +53,6 @@ void ARCPairingContext::optimizeMatchingSet(
     ARCMatchingSet &MatchSet, llvm::SmallVectorImpl<SILInstruction *> &NewInsts,
     llvm::SmallVectorImpl<SILInstruction *> &DeadInsts) {
   DEBUG(llvm::dbgs() << "**** Optimizing Matching Set ****\n");
-
-  // Insert the new increments.
-  for (SILInstruction *InsertPt : MatchSet.IncrementInsertPts) {
-    if (!InsertPt) {
-      DEBUG(llvm::dbgs() << "    No insertion point, not inserting increment "
-            "into new position.\n");
-      continue;
-    }
-
-    MadeChange = true;
-    SILInstruction *NewIncrement = createIncrement(MatchSet.Ptr, InsertPt);
-    NewInsts.push_back(NewIncrement);
-    DEBUG(llvm::dbgs() << "    Inserting new increment: " << *NewIncrement
-                       << "        At insertion point: " << *InsertPt);
-    ++NumRefCountOpsMoved;
-  }
-
-  // Insert the new decrements.
-  for (SILInstruction *InsertPt : MatchSet.DecrementInsertPts) {
-    if (!InsertPt) {
-      DEBUG(llvm::dbgs() << "    No insertion point, not inserting decrement "
-            "into its new position.\n");
-      continue;
-    }
-
-    MadeChange = true;
-    SILInstruction *NewDecrement = createDecrement(MatchSet.Ptr, InsertPt);
-    NewInsts.push_back(NewDecrement);
-    DEBUG(llvm::dbgs() << "    Inserting new NewDecrement: " << *NewDecrement
-                       << "        At insertion point: " << *InsertPt);
-    ++NumRefCountOpsMoved;
-  }
-
   // Add the old increments to the delete list.
   for (SILInstruction *Increment : MatchSet.Increments) {
     MadeChange = true;
@@ -259,6 +193,7 @@ static bool
 processFunctionWithoutLoopSupport(SILFunction &F, bool FreezePostDomReleases,
                                   AliasAnalysis *AA, PostOrderAnalysis *POTA,
                                   RCIdentityFunctionInfo *RCIA,
+                                  EpilogueARCFunctionInfo *EAFI,
                                   ProgramTerminationFunctionInfo *PTFI) {
   // GlobalARCOpts seems to be taking up a lot of compile time when running on
   // globalinit_func. Since that is not *that* interesting from an ARC
@@ -270,7 +205,7 @@ processFunctionWithoutLoopSupport(SILFunction &F, bool FreezePostDomReleases,
   DEBUG(llvm::dbgs() << "***** Processing " << F.getName() << " *****\n");
 
   bool Changed = false;
-  BlockARCPairingContext Context(F, AA, POTA, RCIA, PTFI);
+  BlockARCPairingContext Context(F, AA, POTA, RCIA, EAFI, PTFI);
   // Until we do not remove any instructions or have nested increments,
   // decrements...
   while (true) {
@@ -304,9 +239,9 @@ processFunctionWithoutLoopSupport(SILFunction &F, bool FreezePostDomReleases,
 //===----------------------------------------------------------------------===//
 
 static bool processFunctionWithLoopSupport(
-    SILFunction &F, AliasAnalysis *AA, PostOrderAnalysis *POTA,
+    SILFunction &F, AliasAnalysis *AA, PostOrderAnalysis *POTA, 
     LoopRegionFunctionInfo *LRFI, SILLoopInfo *LI, RCIdentityFunctionInfo *RCFI,
-    ProgramTerminationFunctionInfo *PTFI) {
+    EpilogueARCFunctionInfo *EAFI, ProgramTerminationFunctionInfo *PTFI) {
   // GlobalARCOpts seems to be taking up a lot of compile time when running on
   // globalinit_func. Since that is not *that* interesting from an ARC
   // perspective (i.e. no ref count operations in a loop), disable it on such
@@ -316,7 +251,7 @@ static bool processFunctionWithLoopSupport(
 
   DEBUG(llvm::dbgs() << "***** Processing " << F.getName() << " *****\n");
 
-  LoopARCPairingContext Context(F, AA, LRFI, LI, RCFI, PTFI);
+  LoopARCPairingContext Context(F, AA, LRFI, LI, RCFI, EAFI, PTFI);
   return Context.process();
 }
 
@@ -329,7 +264,6 @@ class ARCSequenceOpts : public SILFunctionTransform {
   /// The entry point to the transformation.
   void run() override {
     auto *F = getFunction();
-
     // If ARC optimizations are disabled, don't optimize anything and bail.
     if (!getOptions().EnableARCOptimizations)
       return;
@@ -338,10 +272,11 @@ class ARCSequenceOpts : public SILFunctionTransform {
       auto *AA = getAnalysis<AliasAnalysis>();
       auto *POTA = getAnalysis<PostOrderAnalysis>();
       auto *RCFI = getAnalysis<RCIdentityAnalysis>()->get(F);
+      auto *EAFI = getAnalysis<EpilogueARCAnalysis>()->get(F);
       ProgramTerminationFunctionInfo PTFI(F);
 
-      if (processFunctionWithoutLoopSupport(*F, false, AA, POTA, RCFI, &PTFI)) {
-        processFunctionWithoutLoopSupport(*F, true, AA, POTA, RCFI, &PTFI);
+      if (processFunctionWithoutLoopSupport(*F, false, AA, POTA, RCFI, EAFI, &PTFI)) {
+        processFunctionWithoutLoopSupport(*F, true, AA, POTA, RCFI, EAFI, &PTFI);
         invalidateAnalysis(SILAnalysis::InvalidationKind::CallsAndInstructions);
       }
       return;
@@ -365,15 +300,15 @@ class ARCSequenceOpts : public SILFunctionTransform {
     auto *AA = getAnalysis<AliasAnalysis>();
     auto *POTA = getAnalysis<PostOrderAnalysis>();
     auto *RCFI = getAnalysis<RCIdentityAnalysis>()->get(F);
+    auto *EAFI = getAnalysis<EpilogueARCAnalysis>()->get(F);
     auto *LRFI = getAnalysis<LoopRegionAnalysis>()->get(F);
     ProgramTerminationFunctionInfo PTFI(F);
 
-    if (processFunctionWithLoopSupport(*F, AA, POTA, LRFI, LI, RCFI, &PTFI)) {
+    if (processFunctionWithLoopSupport(*F, AA, POTA, LRFI, LI, RCFI, EAFI, &PTFI)) {
       invalidateAnalysis(SILAnalysis::InvalidationKind::CallsAndInstructions);
     }
-  }
 
-  StringRef getName() override { return "ARC Sequence Opts"; }
+  }
 };
 
 } // end anonymous namespace

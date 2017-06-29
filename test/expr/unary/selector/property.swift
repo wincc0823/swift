@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -disable-objc-attr-requires-foundation-module -parse -primary-file %s %S/Inputs/property_helper.swift -verify
+// RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -disable-objc-attr-requires-foundation-module -typecheck -primary-file %s %S/Inputs/property_helper.swift -verify -swift-version 4
 import ObjectiveC
 
 // REQUIRES: objc_interop
@@ -37,7 +37,7 @@ class ObjCClass {
     let _ = #selector(setter: myConstant) // expected-error {{argument of '#selector(setter:)' refers to non-settable let 'myConstant'}}
     let _ = #selector(setter: myComputedReadOnlyProperty) // expected-error {{argument of '#selector(setter:)' refers to non-settable var 'myComputedReadOnlyProperty'}}
 
-    let _ = #selector(myClassFunc) // expected-error{{use of unresolved identifier 'myClassFunc'}}
+    let _ = #selector(myClassFunc) // expected-error{{static member 'myClassFunc' cannot be used on instance of type 'ObjCClass'}}
   }
 
   class func classMethod() {
@@ -143,9 +143,9 @@ class ObjCClassWithGetterSetter: NSObject {
 // Looking up inherited members
 
 class BaseClass: NSObject {
-  var myVar = 1
+  @objc var myVar = 1
 
-  func myFunc() {
+  @objc func myFunc() {
   }
 }
 
@@ -205,8 +205,8 @@ class InstanceStaticTestClass {
     let _ = #selector(instanceMethod)
 
     let _ = #selector(getter: staticProperty) // expected-error{{static member 'staticProperty' cannot be used on instance of type 'InstanceStaticTestClass'}}
-    let _ = #selector(classMethod) // expected-error{{use of unresolved identifier 'classMethod'}}
-    let _ = #selector(staticMethod) // expected-error{{use of unresolved identifier 'staticMethod'}}
+    let _ = #selector(classMethod) // expected-error{{static member 'classMethod' cannot be used on instance of type 'InstanceStaticTestClass'}}
+    let _ = #selector(staticMethod) // expected-error{{static member 'staticMethod' cannot be used on instance of type 'InstanceStaticTestClass'}}
 
     let _ = #selector(instanceAndStaticMethod)
   }

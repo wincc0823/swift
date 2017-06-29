@@ -2,17 +2,17 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/AST/AST.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/SourceEntityWalker.h"
+#include "swift/Parse/Parser.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/IDE/Formatting.h"
@@ -26,6 +26,17 @@ namespace {
 struct SiblingAlignInfo {
   SourceLoc Loc;
   bool ExtraIndent;
+};
+
+struct TokenInfo {
+  const Token *StartOfLineTarget;
+  const Token *StartOfLineBeforeTarget;
+  TokenInfo(const Token *StartOfLineTarget,
+            const Token *StartOfLineBeforeTarget) :
+    StartOfLineTarget(StartOfLineTarget),
+    StartOfLineBeforeTarget(StartOfLineBeforeTarget) {}
+  TokenInfo() : TokenInfo(nullptr, nullptr) {}
+  operator bool() { return StartOfLineTarget && StartOfLineBeforeTarget; }
 };
 
 typedef llvm::SmallString<64> StringBuilder;
@@ -47,6 +58,7 @@ class FormatContext {
   swift::ASTWalker::ParentTy End;
   bool InDocCommentBlock;
   bool InCommentLine;
+  bool InStringLiteral;
   SiblingAlignInfo SiblingInfo;
 
 public:
@@ -56,9 +68,11 @@ public:
                 swift::ASTWalker::ParentTy End = swift::ASTWalker::ParentTy(),
                 bool InDocCommentBlock = false,
                 bool InCommentLine = false,
+                bool InStringLiteral = false,
                 SiblingAlignInfo SiblingInfo = SiblingAlignInfo())
     :SM(SM), Stack(Stack), Cursor(Stack.rbegin()), Start(Start), End(End),
      InDocCommentBlock(InDocCommentBlock), InCommentLine(InCommentLine),
+     InStringLiteral(InStringLiteral),
      SiblingInfo(SiblingInfo) { }
 
   FormatContext parent() {
@@ -74,6 +88,18 @@ public:
 
   bool IsInCommentLine() {
     return InCommentLine;
+  }
+
+  bool IsInStringLiteral() const {
+    return InStringLiteral;
+  }
+
+  bool isSwitchControlStmt(unsigned LineIndex, StringRef Text) {
+    if (!isSwitchContext())
+      return false;
+    StringRef LineText = swift::ide::getTextForLine(LineIndex, Text, /*Trim*/true);
+    return LineText.startswith("break") || LineText.startswith("continue") ||
+      LineText.startswith("return") || LineText.startswith("fallthrough");
   }
 
   void padToSiblingColumn(StringBuilder &Builder) {
@@ -181,7 +207,7 @@ public:
 
       if (ParentLineAndColumn.first != LineAndColumn.first) {
         // The start line is not the same, see if this is at the 'else' clause.
-        if (IfStmt *If = dyn_cast_or_null<IfStmt>(Cursor->getAsStmt())) {
+        if (auto *If = dyn_cast_or_null<IfStmt>(Cursor->getAsStmt())) {
           SourceLoc ElseLoc = If->getElseLoc();
           // If we're at 'else', take the indent of 'if' and continue.
           if (ElseLoc.isValid() &&
@@ -232,12 +258,24 @@ public:
     return LineAndColumn;
   }
 
-  bool shouldAddIndentForLine(unsigned Line) {
+  bool exprEndAtLine(Expr *E, unsigned Line) {
+    return E->getEndLoc().isValid() && SM.getLineNumber(E->getEndLoc()) == Line;
+  };
+
+  bool shouldAddIndentForLine(unsigned Line, TokenInfo TInfo,
+                              const CodeFormatOptions &FmtOptions) {
     if (Cursor == Stack.rend())
       return false;
 
+    if (TInfo) {
+      if (TInfo.StartOfLineTarget->getKind() == tok::l_brace &&
+          isKeywordPossibleDeclStart(*TInfo.StartOfLineBeforeTarget) &&
+          TInfo.StartOfLineBeforeTarget->isKeyword())
+        return false;
+    }
+
     // Handle switch / case, indent unless at a case label.
-    if (CaseStmt *Case = dyn_cast_or_null<CaseStmt>(Cursor->getAsStmt())) {
+    if (auto *Case = dyn_cast_or_null<CaseStmt>(Cursor->getAsStmt())) {
       auto LabelItems = Case->getCaseLabelItems();
       SourceLoc Loc;
       if (!LabelItems.empty())
@@ -253,7 +291,7 @@ public:
       // case xyz: <-- No indent here, should be at same level as switch.
       Stmt *AtStmtStart = Start.getAsStmt();
       if (AtStmtStart && isa<CaseStmt>(AtStmtStart))
-        return false;
+        return FmtOptions.IndentSwitchCase;
 
       // If we're at the open brace of the switch, don't add an indent.
       // For example:
@@ -269,7 +307,7 @@ public:
           // // case comment <-- No indent here.
           // case 0:
           if (SM.getLineAndColumn(Case->swift::Stmt::getStartLoc()).first == Line + 1)
-            return false;
+            return FmtOptions.IndentSwitchCase;
         }
       }
     }
@@ -366,7 +404,8 @@ public:
     Expr *AtExprEnd = End.getAsExpr();
     if (AtExprEnd && (isa<ClosureExpr>(AtExprEnd) ||
                       isa<ParenExpr>(AtExprEnd) ||
-                      isa<TupleExpr>(AtExprEnd))) {
+                      isa<TupleExpr>(AtExprEnd) ||
+                      isa<CaptureListExpr>(AtExprEnd))) {
 
       if (auto *Paren = dyn_cast_or_null<ParenExpr>(Cursor->getAsExpr())) {
         auto *SubExpr = Paren->getSubExpr();
@@ -387,9 +426,38 @@ public:
       } else if (auto *Seq = dyn_cast_or_null<SequenceExpr>(Cursor->getAsExpr())) {
         ArrayRef<Expr*> Elements = Seq->getElements();
         if (Elements.size() == 3 &&
-            Elements[1]->getKind() == ExprKind::Assign &&
+            isa<AssignExpr>(Elements[1]) &&
             SM.getLineAndColumn(Elements[2]->getEndLoc()).first == Line) {
               return false;
+        }
+      }
+    }
+
+    //  let msg = String([65, 108, 105, 103, 110].map { c in
+    //    Character(UnicodeScalar(c))
+    //  }) <--- No indentation here.
+    auto AtCursorExpr = Cursor->getAsExpr();
+    if (AtExprEnd && AtCursorExpr && (isa<ParenExpr>(AtCursorExpr) ||
+                                      isa<TupleExpr>(AtCursorExpr))) {
+      if (isa<CallExpr>(AtExprEnd)) {
+        if (exprEndAtLine(AtExprEnd, Line) &&
+            exprEndAtLine(AtCursorExpr, Line)) {
+          return false;
+        }
+      }
+
+      // foo(A: {
+      //  ...
+      // }, B: { <--- No indentation here.
+      //  ...
+      // })
+      if (auto *TE = dyn_cast<TupleExpr>(AtCursorExpr)) {
+        if (isa<ClosureExpr>(AtExprEnd) && exprEndAtLine(AtExprEnd, Line)) {
+          for (auto *ELE : TE->getElements()) {
+            if (exprEndAtLine(ELE, Line)) {
+              return false;
+            }
+          }
         }
       }
     }
@@ -477,7 +545,7 @@ class FormatWalker : public SourceEntityWalker {
         return;
       SourceLoc PrevLoc;
       auto FindAlignLoc = [&](SourceLoc Loc) {
-        if (PrevLoc.isValid() &&
+        if (PrevLoc.isValid() && Loc.isValid() &&
             SM.getLineNumber(PrevLoc) == SM.getLineNumber(Loc))
           return PrevLoc;
         return PrevLoc = Loc;
@@ -504,7 +572,7 @@ class FormatWalker : public SourceEntityWalker {
       if (auto TE = dyn_cast_or_null<TupleExpr>(Node.dyn_cast<Expr *>())) {
         // Trailing closures are not considered siblings to other args.
         unsigned EndAdjust = TE->hasTrailingClosure() ? 1 : 0;
-        for (unsigned I = 0, N = TE->getNumElements() - EndAdjust; I < N; I ++) {
+        for (unsigned I = 0, N = TE->getNumElements() - EndAdjust; I < N; I++) {
           auto EleStart = TE->getElementNameLoc(I);
           if (EleStart.isInvalid()) {
             EleStart = TE->getElement(I)->getStartLoc();
@@ -514,16 +582,6 @@ class FormatWalker : public SourceEntityWalker {
       }
 
       if (auto AFD = dyn_cast_or_null<AbstractFunctionDecl>(Node.dyn_cast<Decl*>())) {
-
-        // Generic type params are siblings to align.
-        if (auto GPL = AFD->getGenericParams()) {
-          const auto Params = GPL->getParams();
-          for (unsigned I = 0, N = Params.size(); I < N; I ++) {
-            addPair(Params[I]->getEndLoc(), FindAlignLoc(Params[I]->getStartLoc()),
-                    tok::comma);
-          }
-        }
-
         // Function parameters are siblings.
         for (auto P : AFD->getParameterLists()) {
           for (ParamDecl* param : *P) {
@@ -536,18 +594,33 @@ class FormatWalker : public SourceEntityWalker {
 
       // Array/Dictionary elements are siblings to align with each other.
       if (auto AE = dyn_cast_or_null<CollectionExpr>(Node.dyn_cast<Expr *>())) {
+        // The following check ends-up creating too much indentation,
+        // for example:
+        //   let something = [
+        //                       a
+        //   ]
+        //
+        // Disabling the check gets us back to the Swift2.2 behavior:
+        //   let something = [
+        //       a
+        //   ]
+        //
+        // FIXME: We are going to revisit the behavior and the indentation we
+        // want for dictionary/array literals.
+        //
+#if 0
         SourceLoc LBracketLoc = AE->getLBracketLoc();
         if (isTargetImmediateAfter(LBracketLoc) &&
             !sameLineWithTarget(LBracketLoc)) {
           FoundSibling = LBracketLoc;
           NeedExtraIndentation = true;
         }
-        for (unsigned I = 0, N = AE->getNumElements(); I < N;  I ++) {
+#endif
+        for (unsigned I = 0, N = AE->getNumElements(); I < N; I++) {
           addPair(AE->getElement(I)->getEndLoc(),
                   FindAlignLoc(AE->getElement(I)->getStartLoc()), tok::comma);
         }
       }
-
       // Case label items in a case statement are siblings.
       if (auto CS = dyn_cast_or_null<CaseStmt>(Node.dyn_cast<Stmt *>())) {
         for (const CaseLabelItem& Item : CS->getCaseLabelItems()) {
@@ -569,6 +642,7 @@ class FormatWalker : public SourceEntityWalker {
   swift::ASTWalker::ParentTy AtEnd;
   bool InDocCommentBlock = false;
   bool InCommentLine = false;
+  bool InStringLiteral = false;
   std::vector<Token> Tokens;
   LangOptions Options;
   TokenIt CurrentTokIt;
@@ -578,7 +652,7 @@ class FormatWalker : public SourceEntityWalker {
   /// Sometimes, target is a part of "parent", for instance, "#else" is a part
   /// of an ifconfigstmt, so that ifconfigstmt is not really the parent of "#else".
   bool isTargetPartOf(swift::ASTWalker::ParentTy Parent) {
-    if (auto Conf = dyn_cast_or_null<IfConfigStmt>(Parent.getAsStmt())) {
+    if (auto Conf = dyn_cast_or_null<IfConfigDecl>(Parent.getAsDecl())) {
       for (auto Clause : Conf->getClauses()) {
         if (Clause.Loc == TargetLocation)
           return true;
@@ -625,7 +699,7 @@ class FormatWalker : public SourceEntityWalker {
       return;
     for (auto InValid = Loc.isInvalid(); CurrentTokIt != Tokens.end() &&
          (InValid || SM.isBeforeInBuffer(CurrentTokIt->getLoc(), Loc));
-         CurrentTokIt ++) {
+         CurrentTokIt++) {
       if (CurrentTokIt->getKind() == tok::comment) {
         auto StartLine = SM.getLineNumber(CurrentTokIt->getRange().getStart());
         auto EndLine = SM.getLineNumber(CurrentTokIt->getRange().getEnd());
@@ -660,7 +734,12 @@ public:
     walk(SF);
     scanForComments(SourceLoc());
     return FormatContext(SM, Stack, AtStart, AtEnd, InDocCommentBlock,
-                         InCommentLine, SCollector.getSiblingInfo());
+                         InCommentLine, InStringLiteral,
+                         SCollector.getSiblingInfo());
+  }
+
+  ArrayRef<Token> getTokens() {
+    return llvm::makeArrayRef(Tokens);
   }
 
   bool walkToDeclPre(Decl *D, CharSourceRange Range) override {
@@ -690,6 +769,12 @@ public:
   }
 
   bool walkToExprPre(Expr *E) override {
+    if (E->getKind() == ExprKind::StringLiteral &&
+        SM.isBeforeInBuffer(E->getStartLoc(), TargetLocation) &&
+        SM.isBeforeInBuffer(TargetLocation,
+                            Lexer::getLocForEndOfToken(SM, E->getEndLoc()))) {
+      InStringLiteral = true;
+    }
     return HandlePre(E, E->getStartLoc(), E->getEndLoc());
   }
 
@@ -710,11 +795,11 @@ public:
 
   std::pair<LineRange, std::string> indent(unsigned LineIndex,
                                            FormatContext &FC,
-                                           StringRef Text) {
+                                           StringRef Text, TokenInfo ToInfo) {
 
     // If having sibling locs to align with, respect siblings.
     if (FC.HasSibling()) {
-      StringRef Line = swift::ide::getTrimmedTextForLine(LineIndex, Text);
+      StringRef Line = swift::ide::getTextForLine(LineIndex, Text, /*Trim*/true);
       StringBuilder Builder;
       FC.padToSiblingColumn(Builder);
       if (FC.needExtraIndentationForSibling()) {
@@ -725,6 +810,11 @@ public:
       }
       Builder.append(Line);
       return std::make_pair(LineRange(LineIndex, 1), Builder.str().str());
+    }
+
+    if (FC.IsInStringLiteral()) {
+      return std::make_pair(LineRange(LineIndex, 1),
+        swift::ide::getTextForLine(LineIndex, Text, /*Trim*/false));
     }
 
     // Take the current indent position of the outer context, then add another
@@ -741,8 +831,18 @@ public:
       ExpandedIndent -= ExpandedIndent % Width;
     };
 
-    if (LineAndColumn.second > 0 && FC.shouldAddIndentForLine(LineIndex))
+    if (LineAndColumn.second > 0 &&
+        FC.shouldAddIndentForLine(LineIndex, ToInfo, FmtOptions))
       AddIndentFunc();
+
+    // Control statements in switch align with the rest of the block in case.
+    // For example:
+    // switch ... {
+    //   case xyz:
+    //     break <-- Extra indent level here.
+    if (FmtOptions.IndentSwitchCase && FC.isSwitchControlStmt(LineIndex, Text))
+      AddIndentFunc();
+
     if (FC.IsInDocCommentBlock()) {
 
       // Inside doc comment block, the indent is one space, e.g.
@@ -753,7 +853,7 @@ public:
     }
 
     // Reformat the specified line with the calculated indent.
-    StringRef Line = swift::ide::getTrimmedTextForLine(LineIndex, Text);
+    StringRef Line = swift::ide::getTextForLine(LineIndex, Text, /*Trim*/true);
     std::string IndentedLine;
     if (FmtOptions.UseTabs)
       IndentedLine.assign(ExpandedIndent / FmtOptions.TabWidth, '\t');
@@ -768,6 +868,40 @@ public:
 
 };
 
+class TokenInfoCollector {
+  SourceManager &SM;
+  ArrayRef<Token> Tokens;
+  unsigned Line;
+
+  struct Comparator {
+    SourceManager &SM;
+    Comparator(SourceManager &SM) : SM(SM) {}
+    bool operator()(const Token &T, unsigned Line) const {
+      return SM.getLineNumber(T.getLoc()) < Line;
+    }
+    bool operator()(unsigned Line, const Token &T) const {
+      return Line < SM.getLineNumber(T.getLoc());
+    }
+  };
+
+public:
+  TokenInfoCollector(SourceManager &SM, ArrayRef<Token> Tokens,
+         unsigned Line) : SM(SM), Tokens(Tokens), Line(Line) {}
+
+  TokenInfo collect() {
+    if (Line == 0)
+      return TokenInfo();
+    Comparator Comp(SM);
+    auto LineMatch = [this] (const Token* T, unsigned Line) {
+      return T != Tokens.end() && SM.getLineNumber(T->getLoc()) == Line;
+    };
+    auto TargetIt = std::lower_bound(Tokens.begin(), Tokens.end(), Line, Comp);
+    auto LineBefore = std::lower_bound(Tokens.begin(), TargetIt, Line - 1, Comp);
+    if (LineMatch(TargetIt, Line) && LineMatch(LineBefore, Line - 1))
+      return TokenInfo(TargetIt, LineBefore);
+    return TokenInfo();
+  }
+};
 } //anonymous namespace
 
 size_t swift::ide::getOffsetOfLine(unsigned LineIndex, StringRef Text) {
@@ -791,20 +925,20 @@ size_t swift::ide::getOffsetOfLine(unsigned LineIndex, StringRef Text) {
   return LineOffset;
 }
 
-size_t swift::ide::getOffsetOfTrimmedLine(unsigned LineIndex, StringRef Text) {
+size_t swift::ide::getOffsetOfLine(unsigned LineIndex, StringRef Text, bool Trim) {
   size_t LineOffset = swift::ide::getOffsetOfLine(LineIndex, Text);
-
+  if (!Trim)
+    return LineOffset;
   // Skip leading whitespace.
   size_t FirstNonWSOnLine = Text.find_first_not_of(" \t\v\f", LineOffset);
   if (FirstNonWSOnLine != std::string::npos)
     LineOffset = FirstNonWSOnLine;
-
   return LineOffset;
 }
 
-llvm::StringRef swift::ide::getTrimmedTextForLine(unsigned LineIndex,
-                                                  StringRef Text) {
-  size_t LineOffset = getOffsetOfTrimmedLine(LineIndex, Text);
+llvm::StringRef swift::ide::getTextForLine(unsigned LineIndex, StringRef Text,
+                                           bool Trim) {
+  size_t LineOffset = getOffsetOfLine(LineIndex, Text, Trim);
   size_t LineEnd = Text.find_first_of("\r\n", LineOffset);
   return Text.slice(LineOffset, LineEnd);
 }
@@ -830,15 +964,17 @@ std::pair<LineRange, std::string> swift::ide::reformat(LineRange Range,
                                                        CodeFormatOptions Options,
                                                        SourceManager &SM,
                                                        SourceFile &SF) {
-            FormatWalker walker(SF, SM);
-            auto SourceBufferID = SF.getBufferID().getValue();
-            StringRef Text = SM.getLLVMSourceMgr()
-                               .getMemoryBuffer(SourceBufferID)->getBuffer();
-            size_t Offset = getOffsetOfTrimmedLine(Range.startLine(), Text);
-            SourceLoc Loc = SM.getLocForBufferStart(SourceBufferID)
-                              .getAdvancedLoc(Offset);
-            FormatContext FC = walker.walkToLocation(Loc);
-            CodeFormatter CF(Options);
-            return CF.indent(Range.startLine(), FC, Text);
+  FormatWalker walker(SF, SM);
+  auto SourceBufferID = SF.getBufferID().getValue();
+  StringRef Text = SM.getLLVMSourceMgr()
+    .getMemoryBuffer(SourceBufferID)->getBuffer();
+  size_t Offset = getOffsetOfLine(Range.startLine(), Text, /*Trim*/true);
+  SourceLoc Loc = SM.getLocForBufferStart(SourceBufferID)
+    .getAdvancedLoc(Offset);
+  FormatContext FC = walker.walkToLocation(Loc);
+  CodeFormatter CF(Options);
+  unsigned Line = Range.startLine();
+  return CF.indent(Line, FC, Text, TokenInfoCollector(SM, walker.getTokens(),
+                                                      Line).collect());
 }
 

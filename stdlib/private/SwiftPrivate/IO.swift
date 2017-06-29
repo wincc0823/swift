@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -25,7 +25,7 @@ public struct _FDInputStream {
 
   public mutating func getline() -> String? {
     if let newlineIndex =
-      _buffer[0..<_bufferUsed].index(of: UInt8(UnicodeScalar("\n").value)) {
+      _buffer[0..<_bufferUsed].index(of: UInt8(Unicode.Scalar("\n").value)) {
       let result = String._fromWellFormedCodeUnitSequence(
         UTF8.self, input: _buffer[0..<newlineIndex])
       _buffer.removeSubrange(0...newlineIndex)
@@ -81,7 +81,7 @@ public struct _FDInputStream {
   }
 }
 
-public struct _Stderr : OutputStream {
+public struct _Stderr : TextOutputStream {
   public init() {}
 
   public mutating func write(_ string: String) {
@@ -91,7 +91,7 @@ public struct _Stderr : OutputStream {
   }
 }
 
-public struct _FDOutputStream : OutputStream {
+public struct _FDOutputStream : TextOutputStream {
   public let fd: CInt
   public var isClosed: Bool = false
 
@@ -100,14 +100,14 @@ public struct _FDOutputStream : OutputStream {
   }
 
   public mutating func write(_ string: String) {
-    let utf8 = string.nulTerminatedUTF8
-    utf8.withUnsafeBufferPointer {
-      (utf8) -> Void in
+    let utf8CStr = string.utf8CString
+    utf8CStr.withUnsafeBufferPointer {
+      (utf8CStr) -> Void in
       var writtenBytes = 0
-      let bufferSize = utf8.count - 1
+      let bufferSize = utf8CStr.count - 1
       while writtenBytes != bufferSize {
         let result = _swift_stdlib_write(
-          self.fd, UnsafePointer(utf8.baseAddress! + Int(writtenBytes)),
+          self.fd, UnsafeRawPointer(utf8CStr.baseAddress! + Int(writtenBytes)),
           bufferSize - writtenBytes)
         if result < 0 {
           fatalError("write() returned an error")

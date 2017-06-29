@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -28,7 +28,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
 
-#include "swift/Basic/Fallthrough.h"
+#include "swift/AST/ExistentialLayout.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/TypeLowering.h"
@@ -146,12 +146,18 @@ llvm::Value *irgen::emitClassDowncast(IRGenFunction &IGF, llvm::Value *from,
   llvm::Constant *castFn;
 
   // Get the best known type information about the destination type.
-  auto destClass = toType.getSwiftRValueType().getClassBound();
-  assert(destClass || toType.is<ArchetypeType>());
+  ClassDecl *destClass = nullptr;
+  if (auto archetypeTy = toType.getAs<ArchetypeType>()) {
+    if (auto superclassTy = archetypeTy->getSuperclass())
+      destClass = superclassTy->getClassOrBoundGenericClass();
+  } else {
+    destClass = toType.getClassOrBoundGenericClass();
+    assert(destClass != nullptr);
+  }
 
   // If the destination type is known to have a Swift-compatible
   // implementation, use the most specific entrypoint.
-  if (destClass && hasKnownSwiftImplementation(IGF.IGM, destClass)) {
+  if (destClass && destClass->hasKnownSwiftImplementation()) {
     metadataRef = IGF.emitTypeMetadataRef(toType.getSwiftRValueType());
 
     switch (mode) {
@@ -163,9 +169,10 @@ llvm::Value *irgen::emitClassDowncast(IRGenFunction &IGF, llvm::Value *from,
       break;
     }
 
-  // If the destination type is a foreign class or a non-specific
+  // If the destination type is a CF type or a non-specific
   // class-bounded archetype, use the most general cast entrypoint.
-  } else if (toType.is<ArchetypeType>() || destClass->isForeign()) {
+  } else if (toType.is<ArchetypeType>() ||
+             destClass->getForeignClassKind()==ClassDecl::ForeignKind::CFType) {
     metadataRef = IGF.emitTypeMetadataRef(toType.getSwiftRValueType());
 
     switch (mode) {
@@ -284,21 +291,34 @@ llvm::Value *irgen::emitReferenceToObjCProtocol(IRGenFunction &IGF,
 /// Emit a helper function to look up \c numProtocols witness tables given
 /// a value and a type metadata reference.
 ///
-/// The function's input type is (value, metadataValue, protocol...)
+/// If \p checkClassConstraint is true, we must emit an explicit check that the
+/// instance is a class.
+///
+/// If \p checkSuperclassConstraint is true, we are given an additional parameter
+/// with a superclass type in it, and must emit a check that the instance is a
+/// subclass of the given class.
+///
+/// The function's input type is (value, metadataValue, superclass?, protocol...)
 /// The function's output type is (value, witnessTable...)
 ///
 /// The value is NULL if the cast failed.
-static llvm::Function *emitExistentialScalarCastFn(IRGenModule &IGM,
-                                                   unsigned numProtocols,
-                                                   CheckedCastMode mode,
-                                                   bool checkClassConstraint) {
+static llvm::Function *
+emitExistentialScalarCastFn(IRGenModule &IGM,
+                            unsigned numProtocols,
+                            CheckedCastMode mode,
+                            bool checkClassConstraint,
+                            bool checkSuperclassConstraint) {
+  assert(!checkSuperclassConstraint || checkClassConstraint);
+
   // Build the function name.
   llvm::SmallString<32> name;
   {
     llvm::raw_svector_ostream os(name);
     os << "dynamic_cast_existential_";
     os << numProtocols;
-    if (checkClassConstraint)
+    if (checkSuperclassConstraint)
+      os << "_superclass";
+    else if (checkClassConstraint)
       os << "_class";
     switch (mode) {
     case CheckedCastMode::Unconditional:
@@ -322,6 +342,8 @@ static llvm::Function *emitExistentialScalarCastFn(IRGenModule &IGM,
   argTys.push_back(IGM.Int8PtrTy);
   argTys.push_back(IGM.TypeMetadataPtrTy);
   returnTys.push_back(IGM.Int8PtrTy);
+  if (checkSuperclassConstraint)
+    argTys.push_back(IGM.TypeMetadataPtrTy);
   for (unsigned i = 0; i < numProtocols; ++i) {
     argTys.push_back(IGM.ProtocolDescriptorPtrTy);
     returnTys.push_back(IGM.WitnessTablePtrTy);
@@ -348,7 +370,26 @@ static llvm::Function *emitExistentialScalarCastFn(IRGenModule &IGM,
   rets.add(value);
 
   // Check the class constraint if necessary.
-  if (checkClassConstraint) {
+  if (checkSuperclassConstraint) {
+    auto superclassMetadata = args.claimNext();
+    auto castFn = IGF.IGM.getDynamicCastMetatypeFn();
+    auto castResult = IGF.Builder.CreateCall(castFn, {ref,
+                                                      superclassMetadata});
+
+    auto cc = cast<llvm::Function>(castFn)->getCallingConv();
+
+    // FIXME: Eventually, we may want to throw.
+    castResult->setCallingConv(cc);
+    castResult->setDoesNotThrow();
+
+    auto isClass = IGF.Builder.CreateICmpNE(
+        castResult,
+        llvm::ConstantPointerNull::get(IGF.IGM.TypeMetadataPtrTy));
+
+    auto contBB = IGF.createBasicBlock("cont");
+    IGF.Builder.CreateCondBr(isClass, contBB, failBB);
+    IGF.Builder.emitBlock(contBB);
+  } else if (checkClassConstraint) {
     auto isClass = IGF.Builder.CreateCall(IGM.getIsClassTypeFn(), ref);
     auto contBB = IGF.createBasicBlock("cont");
     IGF.Builder.CreateCondBr(isClass, contBB, failBB);
@@ -367,7 +408,7 @@ static llvm::Function *emitExistentialScalarCastFn(IRGenModule &IGM,
     IGF.Builder.emitBlock(contBB);
     rets.add(witness);
   }
-  
+
   // If we succeeded, return the witnesses.
   IGF.emitScalarReturn(returnTy, rets);
   
@@ -465,42 +506,43 @@ void irgen::emitScalarExistentialDowncast(IRGenFunction &IGF,
                                   CheckedCastMode mode,
                                   Optional<MetatypeRepresentation> metatypeKind,
                                   Explosion &ex) {
-  SmallVector<ProtocolDecl*, 4> allProtos;
-  destType.getSwiftRValueType().getAnyExistentialTypeProtocols(allProtos);
+  auto srcInstanceType = srcType.getSwiftRValueType();
+  auto destInstanceType = destType.getSwiftRValueType();
+  while (auto metatypeType = dyn_cast<ExistentialMetatypeType>(
+           destInstanceType)) {
+    destInstanceType = metatypeType.getInstanceType();
+    srcInstanceType = cast<AnyMetatypeType>(srcInstanceType).getInstanceType();
+  }
+
+  auto layout = destInstanceType.getExistentialLayout();
 
   // Look up witness tables for the protocols that need them and get
   // references to the ObjC Protocol* values for the objc protocols.
   SmallVector<llvm::Value*, 4> objcProtos;
   SmallVector<llvm::Value*, 4> witnessTableProtos;
 
-  bool hasClassConstraint = false;
+  bool hasClassConstraint = layout.requiresClass();
   bool hasClassConstraintByProtocol = false;
 
-  for (auto proto : allProtos) {
+  bool hasSuperclassConstraint = bool(layout.superclass);
+
+  for (auto protoTy : layout.getProtocols()) {
+    auto *protoDecl = protoTy->getDecl();
+
     // If the protocol introduces a class constraint, track whether we need
     // to check for it independent of protocol witnesses.
-    if (proto->requiresClass()) {
-      hasClassConstraint = true;
-      if (proto->getKnownProtocolKind()
-          && *proto->getKnownProtocolKind() == KnownProtocolKind::AnyObject) {
-        // AnyObject only requires that the type be a class.
-        continue;
-      }
-      
-      // If this protocol is class-constrained but not AnyObject, checking its
-      // conformance will check the class constraint too.
+    if (protoDecl->requiresClass()) {
+      assert(hasClassConstraint);
       hasClassConstraintByProtocol = true;
     }
 
-    if (Lowering::TypeConverter::protocolRequiresWitnessTable(proto)) {
-      auto descriptor = emitProtocolDescriptorRef(IGF, proto);
+    if (Lowering::TypeConverter::protocolRequiresWitnessTable(protoDecl)) {
+      auto descriptor = emitProtocolDescriptorRef(IGF, protoDecl);
       witnessTableProtos.push_back(descriptor);
     }
 
-    if (!proto->isObjC())
-      continue;
-
-    objcProtos.push_back(emitReferenceToObjCProtocol(IGF, proto));
+    if (protoDecl->isObjC())
+      objcProtos.push_back(emitReferenceToObjCProtocol(IGF, protoDecl));
   }
   
   llvm::Type *resultType;
@@ -519,10 +561,34 @@ void irgen::emitScalarExistentialDowncast(IRGenFunction &IGF,
     auto schema = IGF.getTypeInfo(destType).getSchema();
     resultType = schema[0].getScalarType();
   }
-  // We only need to check the class constraint for metatype casts where
-  // no protocol conformance indirectly requires the constraint for us.
-  bool checkClassConstraint =
-    (bool)metatypeKind && hasClassConstraint && !hasClassConstraintByProtocol;
+
+  // The source of a scalar cast is statically known to be a class or a
+  // metatype, so we only have to check the class constraint in two cases:
+  //
+  // 1) The destination type has an explicit superclass constraint that is
+  //    more derived than what the source type is known to be.
+  //
+  // 2) We are casting between metatypes, in which case the source might
+  //    be a non-class metatype.
+  bool checkClassConstraint = false;
+  if ((bool)metatypeKind &&
+      hasClassConstraint &&
+      !hasClassConstraintByProtocol &&
+      !srcInstanceType->mayHaveSuperclass())
+    checkClassConstraint = true;
+
+  // If the source has an equal or more derived superclass constraint than
+  // the destination, we can elide the superclass check.
+  //
+  // Note that destInstanceType is always an existential type, so calling
+  // getSuperclass() returns the superclass constraint of the existential,
+  // not the superclass of some concrete class.
+  bool checkSuperclassConstraint =
+    hasSuperclassConstraint &&
+    !destInstanceType->getSuperclass()->isExactSuperclassOf(srcInstanceType);
+
+  if (checkSuperclassConstraint)
+    checkClassConstraint = true;
 
   llvm::Value *resultValue = value;
 
@@ -658,8 +724,11 @@ void irgen::emitScalarExistentialDowncast(IRGenFunction &IGF,
   }
 
   // Look up witness tables for the protocols that need them.
-  auto fn = emitExistentialScalarCastFn(IGF.IGM, witnessTableProtos.size(),
-                                        mode, checkClassConstraint);
+  auto fn = emitExistentialScalarCastFn(IGF.IGM,
+                                        witnessTableProtos.size(),
+                                        mode,
+                                        checkClassConstraint,
+                                        checkSuperclassConstraint);
 
   llvm::SmallVector<llvm::Value *, 4> args;
 
@@ -668,6 +737,10 @@ void irgen::emitScalarExistentialDowncast(IRGenFunction &IGF,
   args.push_back(resultValue);
 
   args.push_back(metadataValue);
+
+  if (checkSuperclassConstraint)
+    args.push_back(IGF.emitTypeMetadataRef(CanType(layout.superclass)));
+
   for (auto proto : witnessTableProtos)
     args.push_back(proto);
 
@@ -732,16 +805,14 @@ void irgen::emitScalarCheckedCast(IRGenFunction &IGF,
   assert(sourceType.isObject());
   assert(targetType.isObject());
 
-  OptionalTypeKind optKind;
-  if (auto sourceOptObjectType =
-        sourceType.getAnyOptionalObjectType(IGF.getSILModule(), optKind)) {
+  if (auto sourceOptObjectType = sourceType.getAnyOptionalObjectType()) {
 
     // Translate the value from an enum representation to a possibly-null
     // representation.  Note that we assume that this projection is safe
     // for the particular case of an optional class-reference or metatype
     // value.
     Explosion optValue;
-    auto someDecl = IGF.IGM.Context.getOptionalSomeDecl(optKind);
+    auto someDecl = IGF.IGM.Context.getOptionalSomeDecl();
     emitProjectLoadableEnum(IGF, sourceType, value, someDecl, optValue);
 
     assert(value.empty());
@@ -760,7 +831,7 @@ void irgen::emitScalarCheckedCast(IRGenFunction &IGF,
     // value, which we don't need.
     // TODO: In existential-to-existential casts, we should carry over common
     // witness tables from the source to the destination.
-    value.claimAll();
+    (void)value.claimAll();
 
     SmallVector<ProtocolDecl*, 1> protocols;
 
@@ -784,11 +855,9 @@ void irgen::emitScalarCheckedCast(IRGenFunction &IGF,
     llvm::Value *object =
       emitMetatypeToAnyObjectDowncast(IGF, metatypeVal, sourceMetatype, mode);
 
-    auto anyObjectProtocol =
-      IGF.IGM.Context.getProtocol(KnownProtocolKind::AnyObject);
     SILType anyObjectType =
       SILType::getPrimitiveObjectType(
-        CanType(anyObjectProtocol->getDeclaredType()));
+        IGF.IGM.Context.getAnyObjectType());
 
     // Continue, pretending that the source value was an (optional) value.
     Explosion newValue;

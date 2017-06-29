@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -18,6 +18,8 @@
 #include "TypeChecker.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/DiagnosticsSema.h"
+#include "swift/AST/Initializer.h"
+#include "swift/AST/Pattern.h"
 
 using namespace swift;
 
@@ -56,7 +58,7 @@ public:
     : TheKind(Kind::Function),
       IsRethrows(fn->getAttrs().hasAttribute<RethrowsAttr>()),
       IsProtocolMethod(isProtocolMethod),
-      ParamCount(fn->getNaturalArgumentCount()) {
+      ParamCount(fn->getNumParameterLists()) {
     TheFunction = fn;
   }
 
@@ -64,7 +66,7 @@ public:
     : TheKind(Kind::Closure),
       IsRethrows(false),
       IsProtocolMethod(false),
-      ParamCount(closure->getNaturalArgumentCount()) {
+      ParamCount(1) {
     TheClosure = closure;
   }
 
@@ -136,21 +138,23 @@ public:
   static AbstractFunction decomposeFunction(Expr *fn) {
     assert(fn->getValueProvidingExpr() == fn);
 
-    // Look through Optional unwraps
     while (true) {
+      // Look through Optional unwraps.
       if (auto conversion = dyn_cast<ForceValueExpr>(fn)) {
         fn = conversion->getSubExpr()->getValueProvidingExpr();
       } else if (auto conversion = dyn_cast<BindOptionalExpr>(fn)) {
         fn = conversion->getSubExpr()->getValueProvidingExpr();
+      // Look through function conversions.
+      } else if (auto conversion = dyn_cast<FunctionConversionExpr>(fn)) {
+        fn = conversion->getSubExpr()->getValueProvidingExpr();
+      // Look through base-ignored qualified references (Module.methodName).
+      } else if (auto baseIgnored = dyn_cast<DotSyntaxBaseIgnoredExpr>(fn)) {
+        fn = baseIgnored->getRHS();
       } else {
         break;
       }
     }
-    // Look through function conversions.
-    while (auto conversion = dyn_cast<FunctionConversionExpr>(fn)) {
-      fn = conversion->getSubExpr()->getValueProvidingExpr();
-    }
-
+    
     // Normal function references.
     if (auto declRef = dyn_cast<DeclRefExpr>(fn)) {
       ValueDecl *decl = declRef->getDecl();
@@ -188,9 +192,14 @@ class ErrorHandlingWalker : public ASTWalker {
   Impl &asImpl() { return *static_cast<Impl*>(this); }
 public:
   bool walkToDeclPre(Decl *D) override {
+    ShouldRecurse_t recurse = ShouldRecurse;
     // Skip the implementations of all local declarations... except
     // PBD.  We should really just have a PatternBindingStmt.
-    return isa<PatternBindingDecl>(D);
+    if (auto ic = dyn_cast<IfConfigDecl>(D))
+      recurse = asImpl().checkIfConfig(ic);
+    else if (!isa<PatternBindingDecl>(D))
+      recurse = ShouldNotRecurse;
+    return bool(recurse);
   }
 
   std::pair<bool, Expr*> walkToExprPre(Expr *E) override {
@@ -210,6 +219,13 @@ public:
     } else if (auto apply = dyn_cast<ApplyExpr>(E)) {
       recurse = asImpl().checkApply(apply);
     }
+    // Error handling validation (via checkTopLevelErrorHandling) happens after
+    // type checking. If an unchecked expression is still around, the code was
+    // invalid.
+#define UNCHECKED_EXPR(KIND, BASE) \
+    else if (isa<KIND##Expr>(E)) return {false, nullptr};
+#include "swift/AST/ExprNodes.def"
+
     return {bool(recurse), E};
   }
 
@@ -219,8 +235,6 @@ public:
       recurse = asImpl().checkDoCatch(doCatch);
     } else if (auto thr = dyn_cast<ThrowStmt>(S)) {
       recurse = asImpl().checkThrow(thr);
-    } else if (auto ic = dyn_cast<IfConfigStmt>(S)) {
-      recurse = asImpl().checkIfConfig(ic);
     } else {
       assert(!isa<CatchStmt>(S));
     }
@@ -380,11 +394,6 @@ classifyFunctionByType(Type type, unsigned numArgs) {
   }
 }
 
-template <class T>
-static ThrowingKind classifyFunctionBodyWithoutContext(T *fn) {
-  return classifyFunctionByType(fn->getType(), fn->getNaturalArgumentCount());
-}
-
 /// A class for collecting information about rethrowing functions.
 class ApplyClassifier {
   llvm::DenseMap<void*, ThrowingKind> Cache;
@@ -397,8 +406,9 @@ public:
   Classification classifyApply(ApplyExpr *E) {
     // An apply expression is a potential throw site if the function throws.
     // But if the expression didn't type-check, suppress diagnostics.
-    if (!E->getType() || E->getType()->is<ErrorType>())
+    if (!E->getType() || E->getType()->hasError())
       return Classification::forInvalidCode();
+
     auto type = E->getFn()->getType();
     if (!type) return Classification::forInvalidCode();
     auto fnType = type->getAs<AnyFunctionType>();
@@ -411,10 +421,30 @@ public:
     SmallVector<Expr*, 4> args;
     auto fnRef = AbstractFunction::decomposeApply(E, args);
 
+    // If any of the arguments didn't type check, fail.
+    for (auto arg : args) {
+      if (!arg->getType() || arg->getType()->hasError())
+        return Classification::forInvalidCode();
+    }
+
     // If we're applying more arguments than the natural argument
     // count, then this is a call to the opaque value returned from
     // the function.
     if (args.size() != fnRef.getNumArgumentsForFullApply()) {
+      // Special case: a reference to an operator within a type might be
+      // missing 'self'.
+      // FIXME: The issue here is that this is an ill-formed expression, but
+      // we don't know it from the structure of the expression.
+      if (args.size() == 1 && fnRef.getKind() == AbstractFunction::Function &&
+          isa<FuncDecl>(fnRef.getFunction()) &&
+          cast<FuncDecl>(fnRef.getFunction())->isOperator() &&
+          fnRef.getNumArgumentsForFullApply() == 2 &&
+          fnRef.getFunction()->getDeclContext()->isTypeContext()) {
+        // Can only happen with invalid code.
+        assert(fnRef.getFunction()->getASTContext().Diags.hadAnyError());
+        return Classification::forInvalidCode();
+      }
+
       assert(args.size() > fnRef.getNumArgumentsForFullApply() &&
              "partial application was throwing?");
       return Classification::forThrow(PotentialReason::forThrowingApply());
@@ -579,7 +609,7 @@ private:
       return ShouldRecurse;
     }
 
-    ShouldRecurse_t checkIfConfig(IfConfigStmt *S) {
+    ShouldRecurse_t checkIfConfig(IfConfigDecl *D) {
       return ShouldRecurse;
     }
 
@@ -652,20 +682,26 @@ private:
   Classification classifyRethrowsArgument(Expr *arg, Type paramType) {
     arg = arg->getValueProvidingExpr();
 
-    // If the parameter was a tuple, try to look through the various
-    // tuple operations.
-    if (auto paramTupleType = paramType->getAs<TupleType>()) {
+    // If the parameter was structurally a tuple, try to look through the
+    // various tuple operations.
+    if (auto paramTupleType = dyn_cast<TupleType>(paramType.getPointer())) {
       if (auto tuple = dyn_cast<TupleExpr>(arg)) {
         return classifyTupleRethrowsArgument(tuple, paramTupleType);
       } else if (auto shuffle = dyn_cast<TupleShuffleExpr>(arg)) {
         return classifyShuffleRethrowsArgument(shuffle, paramTupleType);
       }
 
-      // Otherwise, we're passing an opaque tuple expression, and we
-      // should treat it as contributing to 'rethrows' if the original
-      // parameter type included a throwing function type.
-      return classifyArgumentByType(paramType,
+      int scalarElt = paramTupleType->getElementForScalarInit();
+      if (scalarElt < 0) {
+        // Otherwise, we're passing an opaque tuple expression, and we
+        // should treat it as contributing to 'rethrows' if the original
+        // parameter type included a throwing function type.
+        return classifyArgumentByType(
+                                    paramType,
                                     PotentialReason::forRethrowsArgument(arg));
+      }
+
+      paramType = paramTupleType->getElementType(scalarElt);
     }
 
     // Otherwise, if the original parameter type was not a throwing
@@ -789,7 +825,7 @@ private:
   /// 'rethrows' function to throw.
   static Classification classifyArgumentByType(Type paramType,
                                                PotentialReason reason) {
-    if (!paramType || paramType->is<ErrorType>())
+    if (!paramType || paramType->hasError())
       return Classification::forInvalidCode();
     if (auto fnType = paramType->getAs<AnyFunctionType>()) {
       if (fnType->throws()) {
@@ -850,9 +886,8 @@ public:
   };
 
 private:
-  template <class T>
-  static Kind getKindForFunctionBody(T *fn) {
-    switch (classifyFunctionBodyWithoutContext(fn)) {
+  static Kind getKindForFunctionBody(Type type, unsigned numArgs) {
+    switch (classifyFunctionByType(type, numArgs)) {
     case ThrowingKind::None:
       return Kind::NonThrowingFunction;
     case ThrowingKind::Invalid:
@@ -885,7 +920,8 @@ public:
       result.RethrowsDC = D;
       return result;
     }
-    return Context(getKindForFunctionBody(D));
+    return Context(getKindForFunctionBody(
+        D->getInterfaceType(), D->getNumParameterLists()));
   }
 
   static Context forInitializer(Initializer *init) {
@@ -908,7 +944,7 @@ public:
   }
 
   static Context forClosure(AbstractClosureExpr *E) {
-    auto kind = getKindForFunctionBody(E);
+    auto kind = getKindForFunctionBody(E->getType(), 1);
     if (kind != Kind::Handled && isa<AutoClosureExpr>(E))
       kind = Kind::NonThrowingAutoClosure;
     return Context(kind);
@@ -1388,10 +1424,17 @@ private:
                    classification.getResult() == ThrowingKind::Throws);
     }
 
-    return ShouldRecurse;
+    // If current apply expression did not type-check, don't attempt
+    // walking inside of it. This accounts for the fact that we don't
+    // erase types without type variables to enable better code complication,
+    // so DeclRefExpr(s) or ApplyExpr with DeclRefExpr as function contained
+    // inside would have their types preserved, which makes classification
+    // incorrect.
+    auto type = E->getType();
+    return !type || type->hasError() ? ShouldNotRecurse : ShouldRecurse;
   }
 
-  ShouldRecurse_t checkIfConfig(IfConfigStmt *S) {
+  ShouldRecurse_t checkIfConfig(IfConfigDecl *ICD) {
     // Check the inactive regions of a #if block to disable warnings that may
     // be due to platform specific code.
     struct ConservativeThrowChecker : public ASTWalker {
@@ -1412,7 +1455,7 @@ private:
       }
     };
 
-    for (auto &clause : S->getClauses()) {
+    for (auto &clause : ICD->getClauses()) {
       // Active clauses are handled by the normal AST walk.
       if (clause.isActive) continue;
       
@@ -1520,7 +1563,7 @@ private:
   }
 };
 
-} // end anonymous namespace 
+} // end anonymous namespace
 
 void TypeChecker::checkTopLevelErrorHandling(TopLevelCodeDecl *code) {
   CheckErrorCoverage checker(*this, Context::forTopLevelCode(code));

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -18,7 +18,6 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Allocator.h"
-#include "llvm/Support/TimeValue.h"
 #include "llvm/Support/TrailingObjects.h"
 #include <functional>
 #include <memory>
@@ -63,7 +62,7 @@ class CodeCompletionStringChunk {
 
 public:
   enum class ChunkKind {
-    /// "internal", "private" or "public".
+    /// "open", "public", "internal", "fileprivate", or "private".
     AccessControlKeyword,
 
     /// such as @"availability".
@@ -128,8 +127,8 @@ public:
     /// editor buffer if the preceding CallParameterName was inserted.
     CallParameterColon,
 
-    /// A equal sign between parameter name and value. Used in decl attribute.
-    DeclAttrParamEqual,
+    /// A colon between parameter name and value. Used in decl attribute.
+    DeclAttrParamColon,
 
     /// Required parameter type.
     CallParameterType,
@@ -197,7 +196,7 @@ public:
            Kind == ChunkKind::CallParameterName ||
            Kind == ChunkKind::CallParameterInternalName ||
            Kind == ChunkKind::CallParameterColon ||
-           Kind == ChunkKind::DeclAttrParamEqual ||
+           Kind == ChunkKind::DeclAttrParamColon ||
            Kind == ChunkKind::DeclAttrParamKeyword ||
            Kind == ChunkKind::CallParameterType ||
            Kind == ChunkKind::CallParameterClosureType ||
@@ -409,6 +408,7 @@ enum class CodeCompletionDeclKind {
   InstanceVar,
   LocalVar,
   GlobalVar,
+  PrecedenceGroup,
 };
 
 enum class CodeCompletionLiteralKind {
@@ -473,7 +473,7 @@ enum class CodeCompletionKeywordKind {
   None,
 #define KEYWORD(X) kw_##X,
 #define POUND_KEYWORD(X) pound_##X,
-#include "swift/Parse/Tokens.def"
+#include "swift/Syntax/TokenKinds.def"
 };
 
 enum class CompletionKind {
@@ -487,6 +487,8 @@ enum class CompletionKind {
   PostfixExprParen,
   SuperExpr,
   SuperExprDot,
+  KeyPathExpr,
+  KeyPathExprDot,
   TypeSimpleBeginning,
   TypeIdentifierWithDot,
   TypeIdentifierWithoutDot,
@@ -501,6 +503,7 @@ enum class CompletionKind {
   ReturnStmtExpr,
   AfterPound,
   GenericParams,
+  SwiftKeyPath,
 };
 
 /// \brief A single code completion result.
@@ -535,11 +538,9 @@ public:
   };
 
   enum NotRecommendedReason {
-
     Redundant,
-
     TypeMismatch,
-
+    Deprecated,
     NoReason,
   };
 

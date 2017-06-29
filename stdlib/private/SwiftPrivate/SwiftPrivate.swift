@@ -2,28 +2,28 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 import SwiftShims
 
 /// Convert the given numeric value to a hexadecimal string.
-public func asHex<T : Integer>(_ x: T) -> String {
-  return "0x" + String(x.toIntMax(), radix: 16)
+  // FIXME(integers): support a more general BinaryInteger protocol
+public func asHex<T : FixedWidthInteger>(_ x: T) -> String {
+  return "0x" + String(x, radix: 16)
 }
 
 /// Convert the given sequence of numeric values to a string representing
 /// their hexadecimal values.
-public func asHex<
-  S: Sequence
-where
-  S.Iterator.Element : Integer
->(_ x: S) -> String {
+  // FIXME(integers): support a more general BinaryInteger protocol
+public func asHex<S : Sequence>(_ x: S) -> String
+  where
+  S.Iterator.Element : FixedWidthInteger {
   return "[ " + x.lazy.map { asHex($0) }.joined(separator: ", ") + " ]"
 }
 
@@ -53,14 +53,10 @@ public func randomShuffle<T>(_ a: [T]) -> [T] {
   return result
 }
 
-public func gather<
-  C : Collection,
-  IndicesSequence : Sequence
-  where
-  IndicesSequence.Iterator.Element == C.Index
->(
+public func gather<C : Collection, IndicesSequence : Sequence>(
   _ collection: C, _ indices: IndicesSequence
-) -> [C.Iterator.Element] {
+) -> [C.Iterator.Element]
+  where IndicesSequence.Iterator.Element == C.Index {
   return Array(indices.map { collection[$0] })
 }
 
@@ -88,7 +84,8 @@ public func withArrayOfCStrings<R>(
 
   return argsBuffer.withUnsafeMutableBufferPointer {
     (argsBuffer) in
-    let ptr = UnsafeMutablePointer<CChar>(argsBuffer.baseAddress!)
+    let ptr = UnsafeMutableRawPointer(argsBuffer.baseAddress!).bindMemory(
+      to: CChar.self, capacity: argsBuffer.count)
     var cStrings: [UnsafeMutablePointer<CChar>?] = argsOffsets.map { ptr + $0 }
     cStrings[cStrings.count - 1] = nil
     return body(cStrings)

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,7 +14,7 @@
 ///
 /// *Deprecated.*
 @_fixed_layout
-public enum ImplicitlyUnwrappedOptional<Wrapped> : NilLiteralConvertible {
+public enum ImplicitlyUnwrappedOptional<Wrapped> : ExpressibleByNilLiteral {
   // The compiler has special knowledge of the existence of
   // `ImplicitlyUnwrappedOptional<Wrapped>`, but always interacts with it using
   // the library intrinsics below.
@@ -30,8 +30,8 @@ public enum ImplicitlyUnwrappedOptional<Wrapped> : NilLiteralConvertible {
 
   /// Creates an instance initialized with `nil`.
   ///
-  /// Don't use this initializer directly; it is used by the compiler when you
-  /// initialize an `Optional` instance with a `nil` literal. For example:
+  /// Do not call this initializer directly. It is used by the compiler when
+  /// you initialize an `Optional` instance with a `nil` literal. For example:
   ///
   ///     let i: Index! = nil
   @_transparent
@@ -45,7 +45,7 @@ extension ImplicitlyUnwrappedOptional : CustomStringConvertible {
   public var description: String {
     switch self {
     case .some(let value):
-      return String(value)
+      return String(describing: value)
     case .none:
       return "nil"
     }
@@ -63,30 +63,6 @@ extension ImplicitlyUnwrappedOptional : CustomDebugStringConvertible {
   }
 }
 
-@_transparent
-@warn_unused_result
-public // COMPILER_INTRINSIC
-func _stdlib_ImplicitlyUnwrappedOptional_isSome<Wrapped>
-  (_ `self`: Wrapped!) -> Bool {
-
-  return `self` != nil
-}
-
-@_transparent
-@warn_unused_result
-public // COMPILER_INTRINSIC
-func _stdlib_ImplicitlyUnwrappedOptional_unwrapped<Wrapped>
-  (_ `self`: Wrapped!) -> Wrapped {
-
-  switch `self` {
-  case .some(let wrapped):
-    return wrapped
-  case .none:
-    _preconditionFailure(
-      "unexpectedly found nil while unwrapping an Optional value")
-  }
-}
-
 #if _runtime(_ObjC)
 extension ImplicitlyUnwrappedOptional : _ObjectiveCBridgeable {
   public func _bridgeToObjectiveC() -> AnyObject {
@@ -95,7 +71,7 @@ extension ImplicitlyUnwrappedOptional : _ObjectiveCBridgeable {
       _preconditionFailure("attempt to bridge an implicitly unwrapped optional containing nil")
 
     case .some(let x):
-      return Swift._bridgeToObjectiveC(x)!
+      return Swift._bridgeAnythingToObjectiveC(x)
     }
   }
 
@@ -119,10 +95,6 @@ extension ImplicitlyUnwrappedOptional : _ObjectiveCBridgeable {
     return false
   }
 
-  public static func _isBridgedToObjectiveC() -> Bool {
-    return Swift._isBridgedToObjectiveC(Wrapped.self)
-  }
-
   public static func _unconditionallyBridgeFromObjectiveC(_ source: AnyObject?)
       -> Wrapped! {
     var result: ImplicitlyUnwrappedOptional<Wrapped>?
@@ -140,14 +112,14 @@ extension ImplicitlyUnwrappedOptional {
 
   @available(*, unavailable, message: "Has been removed in Swift 3.")
   public func map<U>(
-    _ f: @noescape (Wrapped) throws -> U
+    _ f: (Wrapped) throws -> U
   ) rethrows -> ImplicitlyUnwrappedOptional<U> {
     Builtin.unreachable()
   }
 
   @available(*, unavailable, message: "Has been removed in Swift 3.")
   public func flatMap<U>(
-      _ f: @noescape (Wrapped) throws -> ImplicitlyUnwrappedOptional<U>
+      _ f: (Wrapped) throws -> ImplicitlyUnwrappedOptional<U>
   ) rethrows -> ImplicitlyUnwrappedOptional<U> {
     Builtin.unreachable()
   }

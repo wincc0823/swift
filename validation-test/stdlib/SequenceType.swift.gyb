@@ -1,15 +1,12 @@
 // -*- swift -*-
-// RUN: rm -rf %t ; mkdir -p %t
-// RUN: %S/../../utils/gyb %s -o %t/Sequence.swift -D test_path="%S"
-// RUN: %S/../../utils/line-directive %t/Sequence.swift -- %target-build-swift %t/Sequence.swift -o %t/a.out
-// RUN: %S/../../utils/line-directive %t/Sequence.swift -- %target-run %t/a.out
+// RUN: %target-run-simple-swiftgyb
 // REQUIRES: executable_test
 
+% import os.path
 % import gyb
 
 import StdlibUnittest
 import StdlibCollectionUnittest
-import SwiftPrivate
 
 
 // Extend LoggingSequence to shadow the new operation.  When
@@ -30,7 +27,7 @@ extension SequenceLog {
 
 extension LoggingSequence {
   func nonCustomizableOperation() {
-    Log.nonCustomizableOperation[self.dynamicType] += 1
+    Log.nonCustomizableOperation[type(of: self)] += 1
     return base.nonCustomizableOperation()
   }
 }
@@ -77,10 +74,10 @@ SequenceTypeTests.test("${algorithmKind}/WhereElementIsComparable") {
         test.expected${AlgorithmKind}Index!, result.identity,
         stackTrace: SourceLocStack().with(test.loc))
     } else {
-      expectEmpty(
+      expectNil(
         test.expected${AlgorithmKind}Value,
         stackTrace: SourceLocStack().with(test.loc))
-      expectEmpty(
+      expectNil(
         test.expected${AlgorithmKind}Index,
         stackTrace: SourceLocStack().with(test.loc))
     }
@@ -109,10 +106,10 @@ SequenceTypeTests.test("${algorithmKind}/Predicate") {
         test.expected${AlgorithmKind}Index!, result.identity,
         stackTrace: SourceLocStack().with(test.loc))
     } else {
-      expectEmpty(
+      expectNil(
         test.expected${AlgorithmKind}Value,
         stackTrace: SourceLocStack().with(test.loc))
-      expectEmpty(
+      expectNil(
         test.expected${AlgorithmKind}Index,
         stackTrace: SourceLocStack().with(test.loc))
     }
@@ -147,7 +144,7 @@ SequenceTypeTests.test("Demonstration/NotCustomizable") {
   let tester = SequenceLog.dispatchTester([OpaqueValue(1)])
 
   tester.nonCustomizableOperation()
-  
+
   expectNotCustomizable(tester, tester.log.nonCustomizableOperation)
 }
 
@@ -265,7 +262,7 @@ SequenceTypeTests.test("enumerated()") {
     expectType(
       EnumeratedSequence<MinimalSequence<OpaqueValue<Int>>>.self,
       &result)
-    
+
     checkSequence(
       test.expected.map {
         (offset: $0.0, element: OpaqueValue($0.1))
@@ -561,8 +558,9 @@ func callStaticContains(
 }
 
 func callGenericContains<
-  S : Sequence where S.Iterator.Element : Equatable
->(_ sequence: S, _ element: S.Iterator.Element) -> Bool {
+  S : Sequence
+>(_ sequence: S, _ element: S.Iterator.Element) -> Bool
+where S.Iterator.Element : Equatable {
   return sequence.contains(element)
 }
 
@@ -711,11 +709,11 @@ SequenceTypeTests.test("filter/Sequence/Semantics") {
       UnderestimatedCountBehavior.half,
       UnderestimatedCountBehavior.value(0)
     ] {
-      
+
       let s = DefaultedSequence<OpaqueValue<Int>>(
         elements: test.sequence.map(OpaqueValue.init),
         underestimatedCount: underestimatedCountBehavior)
-      
+
       let closureLifetimeTracker = LifetimeTracked(0)
       expectEqual(1, LifetimeTracked.instances)
       var timesClosureWasCalled = 0
@@ -773,7 +771,7 @@ struct MinimalSequenceWith${Implementation}Map<Element> : Sequence {
   }
 
   func map<T>(
-    @noescape _ transform: (Element) throws -> T
+    _ transform: (Element) throws -> T
   ) rethrows -> [T] {
     MinimalSequenceWithCustomMap.timesMapWasCalled += 1
     return try _data.map(transform)
@@ -786,7 +784,7 @@ struct MinimalSequenceWith${Implementation}Map<Element> : Sequence {
 
 func callStaticSequenceMap<T>(
   _ sequence: MinimalSequenceWithDefaultMap<OpaqueValue<Int>>,
-  @noescape transform: (OpaqueValue<Int>) -> T
+  transform: (OpaqueValue<Int>) -> T
 ) -> [T] {
   var result = sequence.map(transform)
   expectType([T].self, &result)
@@ -795,7 +793,7 @@ func callStaticSequenceMap<T>(
 
 func callStaticSequenceMap<T>(
   _ sequence: MinimalSequenceWithCustomMap<OpaqueValue<Int>>,
-  @noescape transform: (OpaqueValue<Int>) -> T
+  transform: (OpaqueValue<Int>) -> T
 ) -> [T] {
   var result = sequence.map(transform)
   expectType([T].self, &result)
@@ -804,7 +802,7 @@ func callStaticSequenceMap<T>(
 
 func callGenericSequenceMap<S : Sequence, T>(
   _ sequence: S,
-  @noescape transform: (S.Iterator.Element) -> T
+  transform: (S.Iterator.Element) -> T
 ) -> [T] {
   var result = sequence.map(transform)
   expectType([T].self, &result)
@@ -896,7 +894,7 @@ SequenceTypeTests.test("flatMap/Sequence") {
   }
 }
 
-% TLazyFlatMapTest = gyb.parse_template("{}/Inputs/flatMap.gyb".format(test_path))
+% TLazyFlatMapTest = gyb.parse_template(os.path.join(os.path.dirname(__file__), "Inputs/flatMap.gyb"))
 % LazyFlatMapTest = gyb.execute_template(TLazyFlatMapTest, Test='SequenceTypeTests', Kinds=['Sequence'])
 ${LazyFlatMapTest}
 
@@ -945,22 +943,12 @@ SequenceTypeTests.test("forEach/dispatch") {
 }
 
 //===----------------------------------------------------------------------===//
-// first()
-//===----------------------------------------------------------------------===//
-
-SequenceTypeTests.test("first/dispatch") {
-  let tester = SequenceLog.dispatchTester([OpaqueValue(1)])
-  tester.first { $0.value == 1 }
-  expectCustomizable(tester, tester.log.first)
-}
-
-//===----------------------------------------------------------------------===//
 // dropFirst()
 //===----------------------------------------------------------------------===//
 
 SequenceTypeTests.test("dropFirst/dispatch") {
   var tester = SequenceLog.dispatchTester([OpaqueValue(1)])
-  tester.dropFirst(1)
+  _ = tester.dropFirst(1)
   expectCustomizable(tester, tester.log.dropFirst)
 }
 
@@ -970,8 +958,18 @@ SequenceTypeTests.test("dropFirst/dispatch") {
 
 SequenceTypeTests.test("dropLast/dispatch") {
   var tester = SequenceLog.dispatchTester([OpaqueValue(1)])
-  tester.dropLast(1)
+  _ = tester.dropLast(1)
   expectCustomizable(tester, tester.log.dropLast)
+}
+
+//===----------------------------------------------------------------------===//
+// drop(while:)
+//===----------------------------------------------------------------------===//
+
+SequenceTypeTests.test("drop(while:)/dispatch") {
+  var tester = SequenceLog.dispatchTester([OpaqueValue(1)])
+  tester.drop { _ in return false }
+  expectCustomizable(tester, tester.log.dropWhile)
 }
 
 //===----------------------------------------------------------------------===//
@@ -980,8 +978,23 @@ SequenceTypeTests.test("dropLast/dispatch") {
 
 SequenceTypeTests.test("prefix/dispatch") {
   var tester = SequenceLog.dispatchTester([OpaqueValue(1)])
-  tester.prefix(1)
+  _ = tester.prefix(1)
   expectCustomizable(tester, tester.log.prefixMaxLength)
+}
+
+SequenceTypeTests.test("prefix/drop/dispatch") {
+  let xs = sequence(first: 1, next: {$0 < 10 ? $0 + 1 : nil})
+  expectEqualSequence([], Array(xs.prefix(3).drop(while: {$0 < 7})))
+}
+
+//===----------------------------------------------------------------------===//
+// prefix(while:)
+//===----------------------------------------------------------------------===//
+
+SequenceTypeTests.test("prefix(while:)/dispatch") {
+  var tester = SequenceLog.dispatchTester([OpaqueValue(1)])
+  tester.prefix { _ in return false }
+  expectCustomizable(tester, tester.log.prefixWhile)
 }
 
 //===----------------------------------------------------------------------===//
@@ -990,7 +1003,7 @@ SequenceTypeTests.test("prefix/dispatch") {
 
 SequenceTypeTests.test("suffix/dispatch") {
   var tester = SequenceLog.dispatchTester([OpaqueValue(1)])
-  tester.suffix(1)
+  _ = tester.suffix(1)
   expectCustomizable(tester, tester.log.suffixMaxLength)
 }
 
@@ -1000,7 +1013,7 @@ SequenceTypeTests.test("suffix/dispatch") {
 
 SequenceTypeTests.test("Sequence/split/dispatch") {
   var tester = SequenceLog.dispatchTester([OpaqueValue(1)])
-  tester.split { $0.value == 1 }
+  _ = tester.split { $0.value == 1 }
   expectCustomizable(tester, tester.log.split)
 }
 
@@ -1047,7 +1060,7 @@ SequenceTypeTests.test("zip") {
     checkSequence(
       test.expected.map { (OpaqueValue($0), OpaqueValue($1)) }, result,
       stackTrace: SourceLocStack().with(test.loc), sameValue: compareElements)
-    
+
     // Check leftovers *after* doing checkSequence(), not before, to ensure
     // that checkSequence() didn't force us to consume more elements than
     // needed.
@@ -1111,9 +1124,9 @@ SequenceTypeTests.test("underestimatedCount/Sequence/CustomImplementation") {
 }
 
 //===----------------------------------------------------------------------===//
-// _copyToNativeArrayBuffer()
+// _copyToContiguousArray()
 //===----------------------------------------------------------------------===//
-SequenceTypeTests.test("_copyToNativeArrayBuffer/OverestimatedCount")
+SequenceTypeTests.test("_copyToContiguousArray/OverestimatedCount")
   .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
@@ -1122,7 +1135,7 @@ SequenceTypeTests.test("_copyToNativeArrayBuffer/OverestimatedCount")
     elements: [ 1, 2, 3 ].map(OpaqueValue.init),
     underestimatedCount: .value(4))
   expectCrashLater()
-  let array = s._copyToNativeArrayBuffer()
+  let array = s._copyToContiguousArray()
   _blackHole(array)
 }
 

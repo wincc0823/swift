@@ -1,5 +1,7 @@
 :orphan:
 
+.. highlight:: none
+
 Debugging the Swift Compiler
 ============================
 
@@ -217,7 +219,7 @@ we know to ignore swift_getGenericMetadata 84 times, i.e.::
 LLDB Scripts
 ````````````
 
-LLDB has powerful capabilities of scripting in python among other languages. An
+LLDB has powerful capabilities of scripting in Python among other languages. An
 often overlooked, but very useful technique is the -s command to lldb. This
 essentially acts as a pseudo-stdin of commands that lldb will read commands
 from. Each time lldb hits a stopping point (i.e. a breakpoint or a
@@ -252,6 +254,21 @@ Then by running ``lldb test -s test.lldb``, lldb will:
 
 Using LLDB scripts can enable one to use complex debugger workflows without
 needing to retype the various commands perfectly every time.
+
+Reducing SIL test cases using bug_reducer
+`````````````````````````````````````````
+
+There is functionality provided in ./swift/utils/bug_reducer/bug_reducer.py for
+reducing SIL test cases by:
+
+1. Producing intermediate sib files that only require some of the passes to
+   trigger the crasher.
+2. Reducing the size of the sil test case by extracting functions or
+   partitioning a module into unoptimized and optimized modules.
+
+For more information and a high level example, see:
+./swift/utils/bug_reducer/README.md.
+
 
 Debugging Swift Executables
 ---------------------------

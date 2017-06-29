@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -29,7 +29,9 @@ extension CMTimeRange {
 
   public var isValid: Bool {
     return self.start.isValid &&
-      self.duration.isValid && (self.duration.epoch == 0)
+      self.duration.isValid &&
+      (self.duration.epoch == 0) &&
+      (self.duration.value >= 0)
   }
 
   public var isIndefinite: Bool {
@@ -45,37 +47,29 @@ extension CMTimeRange {
     return CMTimeRangeGetEnd(self)
   }
 
-  @warn_unused_result
   public func union(_ otherRange: CMTimeRange) -> CMTimeRange {
     return CMTimeRangeGetUnion(self, otherRange)
   }
-  @warn_unused_result
   public func intersection(_ otherRange: CMTimeRange) -> CMTimeRange {
     return CMTimeRangeGetIntersection(self, otherRange)
   }
-  @warn_unused_result
   public func containsTime(_ time: CMTime) -> Bool {
-    return CMTimeRangeContainsTime(self, time).boolValue
+    return CMTimeRangeContainsTime(self, time)
   }
-  @warn_unused_result
   public func containsTimeRange(_ range: CMTimeRange) -> Bool {
-    return CMTimeRangeContainsTimeRange(self, range).boolValue
+    return CMTimeRangeContainsTimeRange(self, range)
   }
 }
 
-@warn_unused_result
 public func CMTIMERANGE_IS_VALID (_ range: CMTimeRange) -> Bool {
   return range.isValid
 }
-@warn_unused_result
 public func CMTIMERANGE_IS_INVALID (_ range: CMTimeRange) -> Bool {
   return !range.isValid
 }
-@warn_unused_result
 public func CMTIMERANGE_IS_INDEFINITE (_ range: CMTimeRange) -> Bool {
   return range.isIndefinite
 }
-@warn_unused_result
 public func CMTIMERANGE_IS_EMPTY (_ range: CMTimeRange) -> Bool {
   return range.isEmpty
 }
@@ -83,13 +77,11 @@ public func CMTIMERANGE_IS_EMPTY (_ range: CMTimeRange) -> Bool {
 extension CMTimeRange : Equatable {}
 
 // CMTimeRangeEqual
-@warn_unused_result
 public func == (range1: CMTimeRange, range2: CMTimeRange) -> Bool {
-  return CMTimeRangeEqual(range1, range2).boolValue
+  return CMTimeRangeEqual(range1, range2)
 }
 
-@warn_unused_result
 public func != (range1: CMTimeRange, range2: CMTimeRange) -> Bool {
-  return !CMTimeRangeEqual(range1, range2).boolValue
+  return !CMTimeRangeEqual(range1, range2)
 }
 

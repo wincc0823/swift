@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -71,49 +71,40 @@ extension CMTime {
   }
 }
 
-@warn_unused_result
 public func CMTIME_IS_VALID(_ time: CMTime) -> Bool {
   return time.isValid
 }
 
-@warn_unused_result
 public func CMTIME_IS_INVALID(_ time: CMTime) -> Bool {
   return !time.isValid
 }
 
-@warn_unused_result
 public func CMTIME_IS_POSITIVEINFINITY(_ time: CMTime) -> Bool {
   return time.isPositiveInfinity
 }
 
-@warn_unused_result
 public func CMTIME_IS_NEGATIVEINFINITY(_ time: CMTime) -> Bool {
   return time.isNegativeInfinity
 }
 
-@warn_unused_result
 public func CMTIME_IS_INDEFINITE(_ time: CMTime) -> Bool {
   return time.isIndefinite
 }
 
-@warn_unused_result
 public func CMTIME_IS_NUMERIC(_ time: CMTime) -> Bool {
   return time.isNumeric
 }
 
-@warn_unused_result
 public func CMTIME_HAS_BEEN_ROUNDED(_ time: CMTime) -> Bool {
   return time.hasBeenRounded
 }
 
 // CMTimeAdd
-@warn_unused_result
 public func + (addend1: CMTime, addend2: CMTime) -> CMTime {
   return CMTimeAdd(addend1, addend2)
 }
 
 // CMTimeSubtract
-@warn_unused_result
 public func - (minuend: CMTime, subtrahend: CMTime) -> CMTime {
   return CMTimeSubtract(minuend, subtrahend)
 }
@@ -121,27 +112,21 @@ public func - (minuend: CMTime, subtrahend: CMTime) -> CMTime {
 extension CMTime : Equatable, Comparable {}
 
 // CMTimeCompare
-@warn_unused_result
 public func < (time1: CMTime, time2: CMTime) -> Bool {
   return CMTimeCompare(time1, time2) < 0
 }
-@warn_unused_result
 public func <= (time1: CMTime, time2: CMTime) -> Bool {
   return CMTimeCompare(time1, time2) <= 0
 }
-@warn_unused_result
 public func > (time1: CMTime, time2: CMTime) -> Bool {
   return CMTimeCompare(time1, time2) > 0
 }
-@warn_unused_result
 public func >= (time1: CMTime, time2: CMTime) -> Bool {
   return CMTimeCompare(time1, time2) >= 0
 }
-@warn_unused_result
 public func == (time1: CMTime, time2: CMTime) -> Bool {
   return CMTimeCompare(time1, time2) == 0
 }
-@warn_unused_result
 public func != (time1: CMTime, time2: CMTime) -> Bool {
   return CMTimeCompare(time1, time2) != 0
 }

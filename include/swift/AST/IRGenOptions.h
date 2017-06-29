@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,6 +20,9 @@
 
 #include "swift/AST/LinkLibrary.h"
 #include "swift/Basic/Sanitizers.h"
+// FIXME: This include is just for llvm::SanitizerCoverageOptions. We should
+// split the header upstream so we don't include so much.
+#include "llvm/Transforms/Instrumentation.h"
 #include <string>
 #include <vector>
 
@@ -45,7 +48,9 @@ enum class IRGenOutputKind : unsigned {
 enum class IRGenDebugInfoKind : unsigned {
   None,       /// No debug info.
   LineTables, /// Line tables only.
-  Normal      /// Line tables + DWARF types.
+  ASTTypes,   /// Line tables + AST type references.
+  DwarfTypes, /// Line tables + AST type references + DWARF types.
+  Normal = ASTTypes /// The setting LLDB prefers.
 };
 
 enum class IRGenEmbedMode : unsigned {
@@ -70,6 +75,9 @@ public:
 
   /// The command line string that is to be stored in the DWARF debug info.
   std::string DWARFDebugFlags;
+
+  /// List of -Xcc -D macro definitions.
+  std::vector<std::string> ClangDefines;
 
   /// The libraries and frameworks specified on the command line.
   SmallVector<LinkLibrary, 4> LinkLibraries;
@@ -159,19 +167,21 @@ public:
   /// List of backend command-line options for -embed-bitcode.
   std::vector<uint8_t> CmdArgs;
 
-  IRGenOptions() : OutputKind(IRGenOutputKind::LLVMAssembly), Verify(true),
-                   Optimize(false), Sanitize(SanitizerKind::None),
-                   DebugInfoKind(IRGenDebugInfoKind::None),
-                   UseJIT(false), DisableLLVMOptzns(false),
-                   DisableLLVMARCOpts(false), DisableLLVMSLPVectorizer(false),
-                   DisableFPElim(true), Playground(false),
-                   EmitStackPromotionChecks(false), GenerateProfile(false),
-                   PrintInlineTree(false), EmbedMode(IRGenEmbedMode::None),
-                   HasValueNamesSetting(false), ValueNames(false),
-                   EnableReflectionMetadata(false), EnableReflectionNames(false),
-                   UseIncrementalLLVMCodeGen(true), UseSwiftCall(false),
-                   CmdArgs()
-                   {}
+  /// Which sanitizer coverage is turned on.
+  llvm::SanitizerCoverageOptions SanitizeCoverage;
+
+  IRGenOptions()
+      : DWARFVersion(2), OutputKind(IRGenOutputKind::LLVMAssembly),
+        Verify(true), Optimize(false), Sanitize(SanitizerKind::None),
+        DebugInfoKind(IRGenDebugInfoKind::None), UseJIT(false),
+        DisableLLVMOptzns(false), DisableLLVMARCOpts(false),
+        DisableLLVMSLPVectorizer(false), DisableFPElim(true), Playground(false),
+        EmitStackPromotionChecks(false), GenerateProfile(false),
+        PrintInlineTree(false), EmbedMode(IRGenEmbedMode::None),
+        HasValueNamesSetting(false), ValueNames(false),
+        EnableReflectionMetadata(true), EnableReflectionNames(true),
+        UseIncrementalLLVMCodeGen(true), UseSwiftCall(false), CmdArgs(),
+        SanitizeCoverage(llvm::SanitizerCoverageOptions()) {}
 
   /// Gets the name of the specified output filename.
   /// If multiple files are specified, the last one is returned.
@@ -189,6 +199,24 @@ public:
     Hash = (Hash << 1) | DisableLLVMOptzns;
     Hash = (Hash << 1) | DisableLLVMARCOpts;
     return Hash;
+  }
+
+  /// Should LLVM IR value names be emitted and preserved?
+  bool shouldProvideValueNames() const {
+    // If the command line contains an explicit request about whether to add
+    // LLVM value names, honor it.  Otherwise, add value names only if the
+    // final result is textual LLVM assembly.
+    if (HasValueNamesSetting) {
+      return ValueNames;
+    } else {
+      return OutputKind == IRGenOutputKind::LLVMAssembly;
+    }
+  }
+
+  /// Return a hash code of any components from these options that should
+  /// contribute to a Swift Bridging PCH hash.
+  llvm::hash_code getPCHHashComponents() const {
+    return llvm::hash_value(0);
   }
 };
 

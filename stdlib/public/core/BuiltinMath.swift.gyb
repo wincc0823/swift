@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -49,8 +49,7 @@ UnaryIntrinsicFunctions = [
     'cos', 'sin',
     'exp', 'exp2',
     'log', 'log10', 'log2',
-    'fabs',
-    'ceil', 'floor', 'nearbyint', 'rint', 'round', 'trunc',
+    'nearbyint', 'rint',
 ]
 
 def TypedUnaryIntrinsicFunctions():
@@ -64,7 +63,6 @@ def TypedUnaryIntrinsicFunctions():
 // Note these have a corresponding LLVM intrinsic
 % for T, CT, bits, ufunc in TypedUnaryIntrinsicFunctions():
 @_transparent
-@warn_unused_result
 public func _${ufunc}(_ x: ${T}) -> ${T} {
   return ${T}(_bits: Builtin.int_${ufunc}_FPIEEE${bits}(x._value))
 }

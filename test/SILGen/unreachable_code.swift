@@ -68,6 +68,7 @@ func testUnreachableCase1(a : Tree) {
     _ = Leaf
     return
   case .Branch(_):  // expected-warning {{case will never be executed}}
+  // expected-warning@-1 {{case is already handled by previous patterns; consider removing it}}
     return
   }
 }
@@ -77,7 +78,7 @@ func testUnreachableCase2(a : Tree) {
   case let Leaf:
     _ = Leaf
     fallthrough
-  case .Branch(_):
+  case .Branch(_): // expected-warning {{case is already handled by previous patterns; consider removing it}}
     return
   }
 }
@@ -87,6 +88,7 @@ func testUnreachableCase3(a : Tree) {
   case _:
     break
   case .Branch(_):  // expected-warning {{case will never be executed}}
+  // expected-warning@-1 {{case is already handled by previous patterns; consider removing it}}
     return
   }
 }
@@ -110,13 +112,13 @@ func testUnreachableCase5(a : Tree) {
 }
 
 
-func testUnreachableAfterThrow(e: ErrorProtocol) throws {
+func testUnreachableAfterThrow(e: Error) throws {
   throw e
   return   // expected-warning {{code after 'throw' will never be executed}}
 }
 
 class TestThrowInInit {
-  required init(e: ErrorProtocol) throws {
+  required init(e: Error) throws {
     throw e  // no unreachable code diagnostic for the implicit return.
   }
 }

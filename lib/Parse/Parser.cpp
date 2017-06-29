@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -24,6 +24,8 @@
 #include "swift/Parse/Lexer.h"
 #include "swift/Parse/CodeCompletionCallbacks.h"
 #include "swift/Parse/DelayedParsingCallbacks.h"
+#include "swift/Syntax/TokenSyntax.h"
+#include "llvm/Support/Compiler.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/SaveAndRestore.h"
@@ -41,7 +43,7 @@ namespace {
     Parser &P;
   public:
     PrettyStackTraceParser(Parser &P) : P(P) {}
-    void print(llvm::raw_ostream &out) const {
+    void print(llvm::raw_ostream &out) const override {
       out << "With parser at source location: ";
       P.Tok.getLoc().print(out, P.Context.SourceMgr);
       out << '\n';
@@ -92,6 +94,7 @@ private:
     }
     if (!Parsed && ParserState.hasFunctionBodyState(AFD))
       TheParser.parseAbstractFunctionBodyDelayed(AFD);
+
     if (CodeCompletion)
       CodeCompletion->doneParsing();
   }
@@ -169,8 +172,10 @@ static void getStringPartTokens(const Token &Tok, const LangOptions &LangOpts,
                                 const SourceManager &SM,
                                 int BufID, std::vector<Token> &Toks) {
   assert(Tok.is(tok::string_literal));
+  bool IsMultiline = Tok.IsMultilineString();
+  unsigned QuoteLen = IsMultiline ? 3 : 1;
   SmallVector<Lexer::StringSegment, 4> Segments;
-  Lexer::getStringLiteralSegments(Tok, Segments, /*Diags=*/0);
+  Lexer::getStringLiteralSegments(Tok, Segments, /*Diags=*/nullptr);
   for (unsigned i = 0, e = Segments.size(); i != e; ++i) {
     Lexer::StringSegment &Seg = Segments[i];
     bool isFirst = i == 0;
@@ -180,17 +185,17 @@ static void getStringPartTokens(const Token &Tok, const LangOptions &LangOpts,
       unsigned Len = Seg.Length;
       if (isFirst) {
         // Include the quote.
-        Loc = Loc.getAdvancedLoc(-1);
-        ++Len;
+        Loc = Loc.getAdvancedLoc(-QuoteLen);
+        Len += QuoteLen;
       }
       if (isLast) {
         // Include the quote.
-        ++Len;
+        Len += QuoteLen;
       }
 
       StringRef Text = SM.extractText({ Loc, Len });
       Token NewTok;
-      NewTok.setToken(tok::string_literal, Text);
+      NewTok.setToken(tok::string_literal, Text, IsMultiline);
       Toks.push_back(NewTok);
 
     } else {
@@ -236,6 +241,7 @@ std::vector<Token> swift::tokenize(const LangOptions &LangOpts,
   Lexer L(LangOpts, SM, BufferID, /*Diags=*/nullptr, /*InSILMode=*/false,
           KeepComments ? CommentRetentionMode::ReturnAsTokens
                        : CommentRetentionMode::AttachToNextToken,
+          TriviaRetentionMode::WithoutTrivia,
           Offset, EndOffset);
 
   auto TokComp = [&] (const Token &A, const Token &B) {
@@ -272,6 +278,33 @@ std::vector<Token> swift::tokenize(const LangOptions &LangOpts,
     }
   } while (Tokens.back().isNot(tok::eof));
   Tokens.pop_back(); // Remove EOF.
+  return Tokens;
+}
+
+// TODO: Refactor into common implementation with swift::tokenize.
+std::vector<std::pair<RC<syntax::RawTokenSyntax>,
+                                 syntax::AbsolutePosition>>
+swift::tokenizeWithTrivia(const LangOptions &LangOpts,
+                          const SourceManager &SM,
+                          unsigned BufferID,
+                          unsigned Offset,
+                          unsigned EndOffset) {
+  if (Offset == 0 && EndOffset == 0)
+    EndOffset = SM.getRangeForBuffer(BufferID).getByteLength();
+
+  Lexer L(LangOpts, SM, BufferID, /*Diags=*/nullptr, /*InSILMode=*/false,
+          CommentRetentionMode::AttachToNextToken,
+          TriviaRetentionMode::WithTrivia,
+          Offset, EndOffset);
+  std::vector<std::pair<RC<syntax::RawTokenSyntax>,
+                        syntax::AbsolutePosition>> Tokens;
+  syntax::AbsolutePosition RunningPos;
+  do {
+    auto ThisToken = L.fullLex();
+    auto ThisTokenPos = ThisToken->accumulateAbsolutePosition(RunningPos);
+    Tokens.push_back({ThisToken, ThisTokenPos});
+  } while (Tokens.back().first->isNot(tok::eof));
+
   return Tokens;
 }
 
@@ -353,7 +386,7 @@ Parser::ParserPosition Parser::getParserPositionAfterFirstCharacter(Token T) {
 
 SourceLoc Parser::consumeStartingCharacterOfCurrentToken() {
   // Consumes one-character token (like '?', '<', '>' or '!') and returns
-  // it's location.
+  // its location.
 
   // Current token can be either one-character token we want to consume...
   if (Tok.getLength() == 1) {
@@ -364,7 +397,8 @@ SourceLoc Parser::consumeStartingCharacterOfCurrentToken() {
 
   // ... or a multi-character token with the first character being the one that
   // we want to consume as a separate token.
-  restoreParserPosition(getParserPositionAfterFirstCharacter(Tok));
+  restoreParserPosition(getParserPositionAfterFirstCharacter(Tok),
+                        /*enableDiagnostics=*/true);
   return PreviousLoc;
 }
 
@@ -420,8 +454,8 @@ void Parser::skipSingle() {
 }
 
 void Parser::skipUntil(tok T1, tok T2) {
-  // tok::unknown is a sentinel that means "don't skip".
-  if (T1 == tok::unknown && T2 == tok::unknown) return;
+  // tok::NUM_TOKENS is a sentinel that means "don't skip".
+  if (T1 == tok::NUM_TOKENS && T2 == tok::NUM_TOKENS) return;
   
   while (Tok.isNot(T1, T2, tok::eof, tok::pound_endif, tok::code_complete))
     skipSingle();
@@ -438,7 +472,7 @@ void Parser::skipUntilAnyOperator() {
 /// of generic parameters, generic arguments, or list of types in a protocol
 /// composition.
 SourceLoc Parser::skipUntilGreaterInTypeList(bool protocolComposition) {
-  SourceLoc lastLoc = Tok.getLoc();
+  SourceLoc lastLoc = PreviousLoc;
   while (true) {
     switch (Tok.getKind()) {
     case tok::eof:
@@ -449,7 +483,7 @@ SourceLoc Parser::skipUntilGreaterInTypeList(bool protocolComposition) {
 
 #define KEYWORD(X) case tok::kw_##X:
 #define POUND_KEYWORD(X) case tok::pound_##X:
-#include "swift/Parse/Tokens.def"
+#include "swift/Syntax/TokenKinds.def"
     // 'Self' can appear in types, skip it.
     if (Tok.is(tok::kw_Self))
       break;
@@ -473,8 +507,8 @@ SourceLoc Parser::skipUntilGreaterInTypeList(bool protocolComposition) {
       
       break;
     }
-    lastLoc = Tok.getLoc();
     skipSingle();
+    lastLoc = PreviousLoc;
   }
 }
 
@@ -547,6 +581,11 @@ Parser::StructureMarkerRAII::StructureMarkerRAII(Parser &parser,
   }
 }
 
+void Parser::StructureMarkerRAII::diagnoseOverflow() {
+  auto Loc = P.StructureMarkers.back().Loc;
+  P.diagnose(Loc, diag::structure_overflow, MaxDepth);
+}
+
 //===----------------------------------------------------------------------===//
 // Primitive Parsing
 //===----------------------------------------------------------------------===//
@@ -554,18 +593,23 @@ Parser::StructureMarkerRAII::StructureMarkerRAII(Parser &parser,
 bool Parser::parseIdentifier(Identifier &Result, SourceLoc &Loc,
                              const Diagnostic &D) {
   switch (Tok.getKind()) {
+  case tok::kw_throws:
   case tok::kw_rethrows:
+    if (!Context.isSwiftVersion3())
+      break;
+    // Swift3 accepts 'throws' and 'rethrows'
+    LLVM_FALLTHROUGH;
   case tok::kw_self:
   case tok::kw_Self:
-  case tok::kw_throws:
   case tok::identifier:
     Loc = consumeIdentifier(&Result);
     return false;
   default:
-    checkForInputIncomplete();
-    diagnose(Tok, D);
-    return true;
+    break;
   }
+  checkForInputIncomplete();
+  diagnose(Tok, D);
+  return true;
 }
 
 bool Parser::parseSpecificIdentifier(StringRef expected, SourceLoc &loc,
@@ -577,7 +621,6 @@ bool Parser::parseSpecificIdentifier(StringRef expected, SourceLoc &loc,
   loc = consumeToken(tok::identifier);
   return false;
 }
-
 
 /// parseAnyIdentifier - Consume an identifier or operator if present and return
 /// its name in Result.  Otherwise, emit an error and return true.
@@ -651,9 +694,8 @@ bool Parser::parseMatchingToken(tok K, SourceLoc &TokLoc, Diag<> ErrorDiag,
 
 ParserStatus
 Parser::parseList(tok RightK, SourceLoc LeftLoc, SourceLoc &RightLoc,
-                  tok SeparatorK, bool OptionalSep, bool AllowSepAfterLast,
-                  Diag<> ErrorDiag, std::function<ParserStatus()> callback) {
-  assert(SeparatorK == tok::comma || SeparatorK == tok::semi);
+                  bool AllowSepAfterLast, Diag<> ErrorDiag,
+                  std::function<ParserStatus()> callback) {
 
   if (Tok.is(RightK)) {
     RightLoc = consumeToken(RightK);
@@ -662,9 +704,8 @@ Parser::parseList(tok RightK, SourceLoc LeftLoc, SourceLoc &RightLoc,
 
   ParserStatus Status;
   while (true) {
-    while (Tok.is(SeparatorK)) {
-      diagnose(Tok, diag::unexpected_separator,
-               SeparatorK == tok::comma ? "," : ";")
+    while (Tok.is(tok::comma)) {
+      diagnose(Tok, diag::unexpected_separator, ",")
         .fixItRemove(SourceRange(Tok.getLoc()));
       consumeToken();
     }
@@ -679,52 +720,43 @@ Parser::parseList(tok RightK, SourceLoc LeftLoc, SourceLoc &RightLoc,
       RightLoc = Tok.getLoc();
       return Status;
     }
-    SourceLoc SepLoc = Tok.getLoc();
-    if (consumeIf(SeparatorK)) {
-      if (Tok.is(RightK)) {
-        if (!AllowSepAfterLast) {
-          diagnose(Tok, diag::unexpected_separator,
-                   SeparatorK == tok::comma ? "," : ";")
-            .fixItRemove(SourceRange(SepLoc));
-        }
+    // If we haven't made progress, or seeing any error, skip ahead.
+    if (Tok.getLoc() == StartLoc || Status.isError()) {
+      assert(Status.isError() && "no progress without error");
+      skipUntilDeclRBrace(RightK, tok::comma);
+      if (Tok.is(RightK) || Tok.isNot(tok::comma))
         break;
-      }
-      continue;
     }
-    if (!OptionalSep) {
-      // If we're in a comma-separated list and the next token starts a new
-      // declaration at the beginning of a new line, skip until the end.
-      if (SeparatorK == tok::comma && Tok.isAtStartOfLine() &&
-          isStartOfDecl() && Tok.getLoc() != StartLoc) {
-        skipUntilDeclRBrace(RightK, SeparatorK);
-        break;
-      }
-
-      StringRef Separator = (SeparatorK == tok::comma ? "," : ";");
-      diagnose(Tok, diag::expected_separator, Separator)
-        .fixItInsertAfter(PreviousLoc, Separator);
-      Status.setIsParseError();
-    }
-
-
-    // If we haven't made progress, skip ahead
-    if (Tok.getLoc() == StartLoc) {
-      skipUntilDeclRBrace(RightK, SeparatorK);
-      if (Tok.is(RightK))
-        break;
-      if (Tok.is(tok::eof) || Tok.is(tok::pound_endif)) {
-        RightLoc = PreviousLoc.isValid()? PreviousLoc : Tok.getLoc();
-        IsInputIncomplete = true;
-        Status.setIsParseError();
-        return Status;
-      }
-      if (consumeIf(SeparatorK) || OptionalSep)
+    if (consumeIf(tok::comma)) {
+      if (Tok.isNot(RightK))
         continue;
+      if (!AllowSepAfterLast) {
+        diagnose(Tok, diag::unexpected_separator, ",")
+          .fixItRemove(SourceRange(PreviousLoc));
+      }
       break;
     }
+    // If we're in a comma-separated list, the next token is at the
+    // beginning of a new line and can never start an element, break.
+    if (Tok.isAtStartOfLine() &&
+        (Tok.is(tok::r_brace) || isStartOfDecl() || isStartOfStmt())) {
+      break;
+    }
+    // If we found EOF or such, bailout.
+    if (Tok.isAny(tok::eof, tok::pound_endif)) {
+      IsInputIncomplete = true;
+      break;
+    }
+
+    diagnose(Tok, diag::expected_separator, ",")
+      .fixItInsertAfter(PreviousLoc, ",");
+    Status.setIsParseError();
   }
 
-  if (parseMatchingToken(RightK, RightLoc, ErrorDiag, LeftLoc)) {
+  if (Status.isError()) {
+    // If we've already got errors, don't emit missing RightK diagnostics.
+    RightLoc = Tok.is(RightK) ? consumeToken() : PreviousLoc;
+  } else if (parseMatchingToken(RightK, RightLoc, ErrorDiag, LeftLoc)) {
     Status.setIsParseError();
   }
 
@@ -738,7 +770,7 @@ void Parser::diagnoseRedefinition(ValueDecl *Prev, ValueDecl *New) {
   assert(New != Prev && "Cannot conflict with self");
   diagnose(New->getLoc(), diag::decl_redefinition, New->isDefinition());
   diagnose(Prev->getLoc(), diag::previous_decldef, Prev->isDefinition(),
-             Prev->getName());
+           Prev->getBaseName());
 }
 
 struct ParserUnit::Implementation {
@@ -755,7 +787,7 @@ struct ParserUnit::Implementation {
       Diags(SM),
       Ctx(LangOpts, SearchPathOpts, SM, Diags),
       SF(new (Ctx) SourceFile(
-            *Module::create(Ctx.getIdentifier(ModuleName), Ctx),
+            *ModuleDecl::create(Ctx.getIdentifier(ModuleName), Ctx),
             SourceFileKind::Main, BufferID,
             SourceFile::ImplicitModuleImportKind::None)) {
   }
@@ -781,6 +813,7 @@ ParserUnit::ParserUnit(SourceManager &SM, unsigned BufferID,
                       BufferID, &Impl.Diags,
                       /*InSILMode=*/false,
                       CommentRetentionMode::None,
+                      TriviaRetentionMode::WithoutTrivia,
                       Offset, EndOffset));
   Impl.TheParser.reset(new Parser(std::move(Lex), *Impl.SF));
 }
@@ -805,25 +838,6 @@ SourceFile &ParserUnit::getSourceFile() {
   return *Impl.SF;
 }
 
-ConditionalCompilationExprState
-swift::operator&&(ConditionalCompilationExprState lhs,
-                  ConditionalCompilationExprState rhs) {
-  return {lhs.isConditionActive() && rhs.isConditionActive(),
-          ConditionalCompilationExprKind::Binary};
-}
-
-ConditionalCompilationExprState
-swift::operator||(ConditionalCompilationExprState lhs,
-                  ConditionalCompilationExprState rhs) {
-  return {lhs.isConditionActive() || rhs.isConditionActive(),
-          ConditionalCompilationExprKind::Binary};
-}
-
-ConditionalCompilationExprState
-swift::operator!(ConditionalCompilationExprState state) {
-  return {!state.isConditionActive(), state.getKind()};
-}
-
 ParsedDeclName swift::parseDeclName(StringRef name) {
   if (name.empty()) return ParsedDeclName();
 
@@ -834,7 +848,7 @@ ParsedDeclName swift::parseDeclName(StringRef name) {
   auto parseBaseName = [&](StringRef text) -> bool {
     // Split the text into context name and base name.
     StringRef contextName, baseName;
-    std::tie(contextName, baseName) = text.split('.');
+    std::tie(contextName, baseName) = text.rsplit('.');
     if (baseName.empty()) {
       baseName = contextName;
       contextName = StringRef();
@@ -842,14 +856,26 @@ ParsedDeclName swift::parseDeclName(StringRef name) {
       return true;
     }
 
+    auto isValidIdentifier = [](StringRef text) -> bool {
+      return Lexer::isIdentifier(text) && text != "_";
+    };
+
     // Make sure we have an identifier for the base name.
-    if (!Lexer::isIdentifier(baseName) || baseName == "_")
+    if (!isValidIdentifier(baseName))
       return true;
 
-    // If we have a context, make sure it is an identifier.
-    if (!contextName.empty() &&
-        (!Lexer::isIdentifier(contextName) || contextName == "_"))
-      return true;
+    // If we have a context, make sure it is an identifier, or a series of
+    // dot-separated identifiers.
+    // FIXME: What about generic parameters?
+    if (!contextName.empty()) {
+      StringRef first;
+      StringRef rest = contextName;
+      do {
+        std::tie(first, rest) = rest.split('.');
+        if (!isValidIdentifier(first))
+          return true;
+      } while (!rest.empty());
+    }
 
     // Record the results.
     result.ContextName = contextName;

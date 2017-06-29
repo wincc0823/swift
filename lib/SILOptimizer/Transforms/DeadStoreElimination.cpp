@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 ///
@@ -62,11 +62,10 @@
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SILOptimizer/Analysis/AliasAnalysis.h"
 #include "swift/SILOptimizer/Analysis/PostOrderAnalysis.h"
-#include "swift/SILOptimizer/Analysis/ValueTracking.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Utils/CFG.h"
-#include "swift/SILOptimizer/Utils/LSBase.h"
+#include "swift/SILOptimizer/Utils/LoadStoreOptUtils.h"
 #include "swift/SILOptimizer/Utils/Local.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/DenseSet.h"
@@ -77,14 +76,14 @@
 
 using namespace swift;
 
-/// If a large store is broken down to too many smaller stores, bail out.
-/// Currently, we only do partial dead store if we can form a single contiguous
-/// non-dead store.
-static llvm::cl::opt<unsigned>
-MaxPartialStoreCount("max-partial-store-count", llvm::cl::init(1), llvm::cl::Hidden);
-
 STATISTIC(NumDeadStores, "Number of dead stores removed");
 STATISTIC(NumPartialDeadStores, "Number of partial dead stores removed");
+
+/// If a large store is broken down to too many smaller stores, bail out.
+/// Currently, we only do partial dead store if we can form a single contiguous
+/// live store.
+static llvm::cl::opt<unsigned>
+MaxPartialStoreCount("max-partial-store-count", llvm::cl::init(1), llvm::cl::Hidden);
 
 /// ComputeMaxStoreSet - If we ignore all reads, what is the max store set that
 /// can reach a particular point in a basic block. This helps in generating
@@ -111,7 +110,7 @@ static llvm::SmallVector<SILInstruction *, 1>
 findDeallocStackInst(AllocStackInst *ASI) {
   llvm::SmallVector<SILInstruction *, 1> DSIs;
   for (auto UI = ASI->use_begin(), E = ASI->use_end(); UI != E; ++UI) {
-    if (DeallocStackInst *D = dyn_cast<DeallocStackInst>(UI->getUser())) {
+    if (auto *D = dyn_cast<DeallocStackInst>(UI->getUser())) {
       DSIs.push_back(D);
     }   
   }
@@ -140,8 +139,6 @@ static bool isDeadStoreInertInstruction(SILInstruction *Inst) {
   case ValueKind::RetainValueInst:
   case ValueKind::DeallocStackInst:
   case ValueKind::CondFailInst:
-  case ValueKind::IsUniqueInst:
-  case ValueKind::IsUniqueOrPinnedInst:
   case ValueKind::FixLifetimeInst:
     return true;
   default:
@@ -154,7 +151,6 @@ static bool isDeadStoreInertInstruction(SILInstruction *Inst) {
 //===----------------------------------------------------------------------===//
 
 namespace {
-
 /// If this function has too many basic blocks or too many locations, it may
 /// take a long time to compute the genset and killset. The number of memory
 /// behavior or alias query we need to do in worst case is roughly linear to
@@ -165,7 +161,7 @@ namespace {
 constexpr unsigned MaxLSLocationBBMultiplicationNone = 256*256;
 
 /// we could run optimistic DSE on functions with less than 64 basic blocks
-/// and 64 locations which is a sizeable function.
+/// and 64 locations which is a sizable function.
 constexpr unsigned MaxLSLocationBBMultiplicationPessimistic = 64*64;
 
 /// forward declaration.
@@ -295,7 +291,6 @@ bool BlockState::isTrackingLocation(llvm::SmallBitVector &BV, unsigned i) {
 //===----------------------------------------------------------------------===//
 
 namespace {
-
 /// The dead store elimination context, keep information about stores in a basic
 /// block granularity.
 class DSEContext {
@@ -322,11 +317,11 @@ private:
   /// Type Expansion Analysis.
   TypeExpansionAnalysis *TE;
 
-  /// The allocator we are using.
-  llvm::BumpPtrAllocator &BPA;
+  /// Epilogue release analysis.
+  EpilogueARCFunctionInfo *EAFI;
 
-  /// The epilogue release matcher we are using.
-  ConsumedArgToEpilogueReleaseMatcher& ERM;
+  /// The allocator we are using.
+  llvm::SpecificBumpPtrAllocator<BlockState> &BPA;
 
   /// Map every basic block to its location state.
   llvm::SmallDenseMap<SILBasicBlock *, BlockState *> BBToLocState;
@@ -429,9 +424,9 @@ public:
   /// Constructor.
   DSEContext(SILFunction *F, SILModule *M, SILPassManager *PM,
              AliasAnalysis *AA, TypeExpansionAnalysis *TE,
-             llvm::BumpPtrAllocator &BPA,
-             ConsumedArgToEpilogueReleaseMatcher &ERM)
-    : Mod(M), F(F), PM(PM), AA(AA), TE(TE), BPA(BPA), ERM(ERM) {}
+             EpilogueARCFunctionInfo *EAFI,
+             llvm::SpecificBumpPtrAllocator<BlockState> &BPA) 
+    : Mod(M), F(F), PM(PM), AA(AA), TE(TE), EAFI(EAFI), BPA(BPA) {}
 
   /// Entry point for dead store elimination.
   bool run();
@@ -441,9 +436,6 @@ public:
 
   /// Returns the location vault of the current function.
   std::vector<LSLocation> &getLocationVault() { return LocationVault; }
-
-  /// Returns the epilogue release matcher we are using.
-  ConsumedArgToEpilogueReleaseMatcher &getERM() const { return ERM; }
 
   /// Use a set of ad hoc rules to tell whether we should run a pessimistic
   /// one iteration data flow on the function.
@@ -596,7 +588,7 @@ void DSEContext::processBasicBlockForGenKillSet(SILBasicBlock *BB) {
   }
 
   // Handle SILArgument for base invalidation.
-  ArrayRef<SILArgument *> Args = BB->getBBArgs();
+  ArrayRef<SILArgument *> Args = BB->getArguments();
   for (auto &X : Args) {
     invalidateBase(X, BBState, DSEKind::BuildGenKillSet);
   }
@@ -639,7 +631,7 @@ void DSEContext::processBasicBlockForDSE(SILBasicBlock *BB, bool Optimistic) {
   }
 
   // Handle SILArgument for base invalidation.
-  ArrayRef<SILArgument *> Args = BB->getBBArgs();
+  ArrayRef<SILArgument *> Args = BB->getArguments();
   for (auto &X : Args) {
     invalidateBase(X, S, DSEKind::BuildGenKillSet);
   }
@@ -1056,7 +1048,7 @@ void DSEContext::processUnknownReadInstForDSE(SILInstruction *I) {
 void DSEContext::processUnknownReadInst(SILInstruction *I, DSEKind Kind) {
   // If this is a release on a guaranteed parameter, it can not call deinit,
   // which might read or write memory.
-  if (isIntermediateRelease(I, ERM))
+  if (isIntermediateRelease(I, EAFI))
     return;
 
   // Are we building genset and killset.
@@ -1099,7 +1091,7 @@ void DSEContext::runIterativeDSE() {
   // Generate the genset and killset for each basic block. We can process the
   // basic blocks in any order.
   // 
-  // We also Compute the max store set at the beginning of the basic block.
+  // We also compute the max store set at the beginning of the basic block.
   //
   auto *PO = PM->getAnalysis<PostOrderAnalysis>()->get(F);
   for (SILBasicBlock *B : PO->getPostOrder()) {
@@ -1121,7 +1113,7 @@ void DSEContext::runIterativeDSE() {
     SILBasicBlock *BB = WorkList.pop_back_val();
     HandledBBs.erase(BB);
     if (processBasicBlockWithGenKillSet(BB)) {
-      for (auto X : BB->getPreds()) {
+      for (auto X : BB->getPredecessorBlocks()) {
         // We do not push basic block into the worklist if its already 
         // in the worklist.
         if (HandledBBs.find(X) != HandledBBs.end())
@@ -1154,7 +1146,7 @@ bool DSEContext::run() {
   // Initialize the BBToLocState mapping.
   unsigned LocationNum = this->getLocationVault().size();
   for (auto &B : *F) {
-    auto *State = new (BPA) BlockState(&B, LocationNum, Optimistic);
+    auto *State = new (BPA.Allocate()) BlockState(&B, LocationNum, Optimistic);
     BBToLocState[&B] = State;
     State->initStoreSetAtEndOfBlock(*this);
   }
@@ -1200,7 +1192,8 @@ bool DSEContext::run() {
       SILInstruction *Inst = cast<SILInstruction>(I->first);
       auto *IT = &*std::next(Inst->getIterator());
       SILBuilderWithScope Builder(IT);
-      Builder.createStore(Inst->getLoc(), I->second, Inst);
+      Builder.createStore(Inst->getLoc(), I->second, Inst,
+                          StoreOwnershipQualifier::Unqualified);
     }
     // Delete the dead stores.
     for (auto &I : getBlockState(&BB)->DeadStores) {
@@ -1222,8 +1215,6 @@ namespace {
 
 class DeadStoreElimination : public SILFunctionTransform {
 public:
-  StringRef getName() override { return "SIL Dead Store Elimination"; }
-
   /// The entry point to the transformation.
   void run() override {
     SILFunction *F = getFunction();
@@ -1231,15 +1222,12 @@ public:
 
     auto *AA = PM->getAnalysis<AliasAnalysis>();
     auto *TE = PM->getAnalysis<TypeExpansionAnalysis>();
-    auto *RCFI = PM->getAnalysis<RCIdentityAnalysis>()->get(F);
+    auto *EAFI = PM->getAnalysis<EpilogueARCAnalysis>()->get(F);
 
     // The allocator we are using.
-    llvm::BumpPtrAllocator BPA;
+    llvm::SpecificBumpPtrAllocator<BlockState> BPA;
 
-    // The epilogue release matcher we are using.
-    ConsumedArgToEpilogueReleaseMatcher ERM(RCFI, F);
-
-    DSEContext DSE(F, &F->getModule(), PM, AA, TE, BPA, ERM);
+    DSEContext DSE(F, &F->getModule(), PM, AA, TE, EAFI, BPA);
     if (DSE.run()) {
       invalidateAnalysis(SILAnalysis::InvalidationKind::Instructions);
     }

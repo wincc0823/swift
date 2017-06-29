@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -607,7 +607,7 @@ public:
       auto type = getType();
       if (isa<ArchetypeType>(type) ||
           isa<DependentMemberType>(type) ||
-          isa<AbstractTypeParamType>(type)) {
+          isa<GenericTypeParamType>(type)) {
         return true;
       }
       return false;
@@ -636,7 +636,7 @@ public:
       if (auto archetype = dyn_cast<ArchetypeType>(type))
         return archetype->requiresClass();
       else if (isa<DependentMemberType>(type) ||
-               isa<AbstractTypeParamType>(type)) {
+               isa<GenericTypeParamType>(type)) {
         assert(GenericSig &&
                "Dependent type in pattern without generic signature?");
         return GenericSig->requiresClass(type, module);
@@ -893,9 +893,9 @@ public:
   /// the abstraction pattern for its object type.
   AbstractionPattern getTupleElementType(unsigned index) const;
 
-  /// Given that the value being abstracted is an l-value type, return
-  /// the abstraction pattern for its object type.
-  AbstractionPattern getLValueObjectType() const;
+  /// Given that the value being abstracted is an l-value or inout type,
+  /// return the abstraction pattern for its object type.
+  AbstractionPattern getLValueOrInOutObjectType() const;
 
   /// Given that the value being abstracted is a function, return the
   /// abstraction pattern for its result type.

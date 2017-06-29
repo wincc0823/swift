@@ -1,5 +1,4 @@
-// RUN: rm -rf %t
-// RUN: mkdir -p %t
+// RUN: %empty-directory(%t)
 // RUN: %target-build-swift %s -Xfrontend -disable-access-control -o %t/Assert_Debug
 // RUN: %target-build-swift %s -Xfrontend -disable-access-control -o %t/Assert_Release -O
 // RUN: %target-build-swift %s -Xfrontend -disable-access-control -o %t/Assert_Unchecked -Ounchecked
@@ -19,7 +18,7 @@ import StdlibUnittest
 
 func testTrapsAreNoreturn(i: Int) -> Int {
   // Don't need a return statement in 'case' statements because these functions
-  // are @noreturn.
+  // never return.
   switch i {
   case 2:
     preconditionFailure("cannot happen")

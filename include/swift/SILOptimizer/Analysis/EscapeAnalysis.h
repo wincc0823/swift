@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -15,6 +15,7 @@
 
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILFunction.h"
+#include "swift/SILOptimizer/Analysis/BasicCalleeAnalysis.h"
 #include "swift/SILOptimizer/Analysis/BottomUpIPAnalysis.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
@@ -298,6 +299,8 @@ public:
         case EscapeState::Global:
           return true;
       }
+
+      llvm_unreachable("Unhandled EscapeState in switch.");
     }
 
     /// Returns the content node if of this node if it exists in the graph.
@@ -673,20 +676,35 @@ private:
     return FInfo;
   }
 
+  /// Build a connection graph for reach callee from the callee list.
+  bool buildConnectionGraphForCallees(SILInstruction *Caller,
+                                      CalleeList Callees,
+                                      FunctionInfo *FInfo,
+                                      FunctionOrder &BottomUpOrder,
+                                      int RecursionDepth);
+
+  /// Build a connection graph for the destructor invoked for a provided
+  /// SILValue.
+  bool buildConnectionGraphForDestructor(SILValue V,
+                                         SILInstruction *Caller,
+                                         FunctionInfo *FInfo,
+                                         FunctionOrder &BottomUpOrder,
+                                         int RecursionDepth);
+
   /// Builds the connection graph for a function, including called functions.
   /// Visited callees are added to \p BottomUpOrder until \p RecursionDepth
   /// reaches MaxRecursionDepth.
   void buildConnectionGraph(FunctionInfo *FInfo, FunctionOrder &BottomUpOrder,
                             int RecursionDepth);
 
-  /// Updates the graph by analysing instruction \p I.
+  /// Updates the graph by analyzing instruction \p I.
   /// Visited callees are added to \p BottomUpOrder until \p RecursionDepth
   /// reaches MaxRecursionDepth.
   void analyzeInstruction(SILInstruction *I, FunctionInfo *FInfo,
                           FunctionOrder &BottomUpOrder,
                           int RecursionDepth);
 
-  /// Updates the graph by analysing instruction \p SI, which may be a
+  /// Updates the graph by analyzing instruction \p SI, which may be a
   /// select_enum, select_enum_addr or select_value.
   template<class SelectInst>
   void analyzeSelectInst(SelectInst *SI, ConnectionGraph *ConGraph);
@@ -703,7 +721,7 @@ private:
 
   /// Merges the graph of a callee function into the graph of
   /// a caller function, whereas \p FAS is the call-site.
-  bool mergeCalleeGraph(FullApplySite FAS,
+  bool mergeCalleeGraph(SILInstruction *FAS,
                         ConnectionGraph *CallerGraph,
                         ConnectionGraph *CalleeGraph);
 
@@ -773,9 +791,23 @@ public:
   /// node, the pointers do not alias.
   bool canPointToSameMemory(SILValue V1, SILValue V2);
 
-  virtual void invalidate(InvalidationKind K) override;
+  /// Invalidate all information in this analysis.
+  virtual void invalidate() override;
 
+  /// Invalidate all of the information for a specific function.
   virtual void invalidate(SILFunction *F, InvalidationKind K) override;
+
+  /// Notify the analysis about a newly created function.
+  virtual void notifyAddFunction(SILFunction *F) override { }
+
+  /// Notify the analysis about a function which will be deleted from the
+  /// module.
+  virtual void notifyDeleteFunction(SILFunction *F) override {
+    invalidate(F, InvalidationKind::Nothing);
+  }
+
+  /// Notify the analysis about changed witness or vtables.
+  virtual void invalidateFunctionTables() override { }
 
   virtual void handleDeleteNotification(ValueBase *I) override;
 

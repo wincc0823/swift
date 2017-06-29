@@ -1,8 +1,10 @@
-add_swift_library(swiftParse
+add_swift_library(swiftParse STATIC
+  Confusables.cpp
   Lexer.cpp
   ParseDecl.cpp
   ParseExpr.cpp
   ParseGeneric.cpp
+  ParseIfConfig.cpp
   ParsePattern.cpp
   Parser.cpp
   ParseSIL.cpp
@@ -11,6 +13,8 @@ add_swift_library(swiftParse
   PersistentParserState.cpp
   Scope.cpp
   LINK_LIBRARIES
+    swiftAST
     swiftSIL
-    swiftAST)
+    swiftSyntax
+)
 

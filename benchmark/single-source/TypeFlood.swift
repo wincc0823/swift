@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -36,22 +36,22 @@ struct Some0<T> {
 
 @inline(never)
 func flood<T>(_ x: T) {
-  Some1<Some1<Some1<Some1<T>>>>() is Pingable
-  Some1<Some1<Some1<Some0<T>>>>() is Pingable
-  Some1<Some1<Some0<Some1<T>>>>() is Pingable
-  Some1<Some1<Some0<Some0<T>>>>() is Pingable
-  Some1<Some0<Some1<Some1<T>>>>() is Pingable
-  Some1<Some0<Some1<Some0<T>>>>() is Pingable
-  Some1<Some0<Some0<Some1<T>>>>() is Pingable
-  Some1<Some0<Some0<Some0<T>>>>() is Pingable
-  Some0<Some1<Some1<Some1<T>>>>() is Pingable
-  Some0<Some1<Some1<Some0<T>>>>() is Pingable
-  Some0<Some1<Some0<Some1<T>>>>() is Pingable
-  Some0<Some1<Some0<Some0<T>>>>() is Pingable
-  Some0<Some0<Some1<Some1<T>>>>() is Pingable
-  Some0<Some0<Some1<Some0<T>>>>() is Pingable
-  Some0<Some0<Some0<Some1<T>>>>() is Pingable
-  Some0<Some0<Some0<Some0<T>>>>() is Pingable
+  _ = Some1<Some1<Some1<Some1<T>>>>() is Pingable
+  _ = Some1<Some1<Some1<Some0<T>>>>() is Pingable
+  _ = Some1<Some1<Some0<Some1<T>>>>() is Pingable
+  _ = Some1<Some1<Some0<Some0<T>>>>() is Pingable
+  _ = Some1<Some0<Some1<Some1<T>>>>() is Pingable
+  _ = Some1<Some0<Some1<Some0<T>>>>() is Pingable
+  _ = Some1<Some0<Some0<Some1<T>>>>() is Pingable
+  _ = Some1<Some0<Some0<Some0<T>>>>() is Pingable
+  _ = Some0<Some1<Some1<Some1<T>>>>() is Pingable
+  _ = Some0<Some1<Some1<Some0<T>>>>() is Pingable
+  _ = Some0<Some1<Some0<Some1<T>>>>() is Pingable
+  _ = Some0<Some1<Some0<Some0<T>>>>() is Pingable
+  _ = Some0<Some0<Some1<Some1<T>>>>() is Pingable
+  _ = Some0<Some0<Some1<Some0<T>>>>() is Pingable
+  _ = Some0<Some0<Some0<Some1<T>>>>() is Pingable
+  _ = Some0<Some0<Some0<Some0<T>>>>() is Pingable
 }
 
 @inline(never)

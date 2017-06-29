@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -15,29 +15,25 @@
 /// In most cases, it's best to ignore this protocol and use the
 /// `MutableCollection` protocol instead, because it has a more complete
 /// interface.
-public protocol MutableIndexable : Indexable {
-  // FIXME(ABI)(compiler limitation): there is no reason for this protocol
+@available(*, deprecated, message: "it will be removed in Swift 4.0.  Please use 'MutableCollection' instead")
+public typealias MutableIndexable = _MutableIndexable
+public protocol _MutableIndexable : _Indexable {
+  // FIXME(ABI)#52 (Recursive Protocol Constraints): there is no reason for this protocol
   // to exist apart from missing compiler features that we emulate with it.
+  // rdar://problem/20531108
   //
   // This protocol is almost an implementation detail of the standard
   // library; it is used to deduce things like the `SubSequence` and
   // `Iterator` type from a minimal collection, but it is also used in
   // exposed places like as a constraint on `IndexingIterator`.
 
-  /// A type that represents a valid position in the collection.
-  ///
-  /// Valid indices consist of the position of every element and a
-  /// "past the end" position that's not valid for use as a subscript.
-  // TODO: swift-3-indexing-model - Index only needs to be comparable or must be comparable..?
-  associatedtype Index : Comparable
-
   /// The position of the first element in a nonempty collection.
   ///
   /// If the collection is empty, `startIndex` is equal to `endIndex`.
   var startIndex: Index { get }
 
-  /// The collection's "past the end" position, or one greater than the last
-  /// valid subscript argument.
+  /// The collection's "past the end" position---that is, the position one
+  /// greater than the last valid subscript argument.
   ///
   /// When you need a range that includes the last element of a collection, use
   /// the half-open range operator (`..<`) with `endIndex`. The `..<` operator
@@ -52,16 +48,6 @@ public protocol MutableIndexable : Indexable {
   ///
   /// If the collection is empty, `endIndex` is equal to `startIndex`.
   var endIndex: Index { get }
-
-  // The declaration of _Element and subscript here is a trick used to
-  // break a cyclic conformance/deduction that Swift can't handle.  We
-  // need something other than a Collection.Iterator.Element that can
-  // be used as IndexingIterator<T>'s Element.  Here we arrange for
-  // the Collection itself to have an Element type that's deducible from
-  // its subscript.  Ideally we'd like to constrain this Element to be the same
-  // as Collection.Iterator.Element (see below), but we have no way of
-  // expressing it today.
-  associatedtype _Element
 
   /// Accesses the element at the specified position.
   ///
@@ -81,10 +67,8 @@ public protocol MutableIndexable : Indexable {
   /// - Parameter position: The position of the element to access. `position`
   ///   must be a valid index of the collection that is not equal to the
   ///   `endIndex` property.
-  subscript(position: Index) -> _Element { get set }
+  subscript(position: Index) -> Element { get set }
 
-  associatedtype SubSequence
-  
   /// Accesses a contiguous subrange of the collection's elements.
   ///
   /// The accessed slice uses the same indices for the same elements as the
@@ -150,13 +134,17 @@ public protocol MutableIndexable : Indexable {
   /// - Complexity: O(1).
   func _failEarlyRangeCheck(_ range: Range<Index>, bounds: Range<Index>)
 
-  /// Returns the next consecutive `Index` in a discrete sequence of
-  /// `Index` values.
+  /// Returns the position immediately after the given index.
   ///
-  /// - Precondition: `i` has a well-defined successor.
-  @warn_unused_result
+  /// - Parameter i: A valid index of the collection. `i` must be less than
+  ///   `endIndex`.
+  /// - Returns: The index value immediately after `i`.
   func index(after i: Index) -> Index
 
+  /// Replaces the given index with its successor.
+  ///
+  /// - Parameter i: A valid index of the collection. `i` must be less than
+  ///   `endIndex`.
   func formIndex(after i: inout Index)
 }
 
@@ -208,14 +196,14 @@ public protocol MutableIndexable : Indexable {
 ///     // Must be equivalent to:
 ///     a[i] = x
 ///     let y = x
-public protocol MutableCollection : MutableIndexable, Collection {
-  // FIXME: should be constrained to MutableCollection
-  // (<rdar://problem/20715009> Implement recursive protocol
-  // constraints)
-  /// A collection that represents a contiguous subrange of the collection's
-  /// elements.
-  associatedtype SubSequence : Collection /*: MutableCollection*/
-    = MutableSlice<Self>
+public protocol MutableCollection : _MutableIndexable, Collection
+// FIXME(ABI) (Revert Where Clauses): restore this:
+// where SubSequence: MutableCollection
+{
+  associatedtype SubSequence
+  // FIXME(ABI) (Revert Where Clauses): remove this conformance:
+  : Collection
+   = MutableSlice<Self>
 
   /// Accesses the element at the specified position.
   ///
@@ -235,7 +223,7 @@ public protocol MutableCollection : MutableIndexable, Collection {
   /// - Parameter position: The position of the element to access. `position`
   ///   must be a valid index of the collection that is not equal to the
   ///   `endIndex` property.
-  subscript(position: Index) -> Iterator.Element {get set}
+  subscript(position: Index) -> Element {get set}
 
   /// Accesses a contiguous subrange of the collection's elements.
   ///
@@ -261,6 +249,57 @@ public protocol MutableCollection : MutableIndexable, Collection {
   ///   the range must be valid indices of the collection.
   subscript(bounds: Range<Index>) -> SubSequence {get set}
 
+  /// Reorders the elements of the collection such that all the elements
+  /// that match the given predicate are after all the elements that don't
+  /// match.
+  ///
+  /// After partitioning a collection, there is a pivot index `p` where
+  /// no element before `p` satisfies the `belongsInSecondPartition`
+  /// predicate and every element at or after `p` satisfies
+  /// `belongsInSecondPartition`.
+  ///
+  /// In the following example, an array of numbers is partitioned by a
+  /// predicate that matches elements greater than 30.
+  ///
+  ///     var numbers = [30, 40, 20, 30, 30, 60, 10]
+  ///     let p = numbers.partition(by: { $0 > 30 })
+  ///     // p == 5
+  ///     // numbers == [30, 10, 20, 30, 30, 60, 40]
+  ///
+  /// The `numbers` array is now arranged in two partitions. The first
+  /// partition, `numbers[..<p]`, is made up of the elements that
+  /// are not greater than 30. The second partition, `numbers[p...]`,
+  /// is made up of the elements that *are* greater than 30.
+  ///
+  ///     let first = numbers[..<p]
+  ///     // first == [30, 10, 20, 30, 30]
+  ///     let second = numbers[p...]
+  ///     // second == [60, 40]
+  ///
+  /// - Parameter belongsInSecondPartition: A predicate used to partition
+  ///   the collection. All elements satisfying this predicate are ordered
+  ///   after all elements not satisfying it.
+  /// - Returns: The index of the first element in the reordered collection
+  ///   that matches `belongsInSecondPartition`. If no elements in the
+  ///   collection match `belongsInSecondPartition`, the returned index is
+  ///   equal to the collection's `endIndex`.
+  ///
+  /// - Complexity: O(*n*)
+  mutating func partition(
+    by belongsInSecondPartition: (Element) throws -> Bool
+  ) rethrows -> Index
+
+  /// Exchanges the values at the specified indices of the collection.
+  ///
+  /// Both parameters must be valid indices of the collection and not
+  /// equal to `endIndex`. Passing the same index as both `i` and `j` has no
+  /// effect.
+  ///
+  /// - Parameters:
+  ///   - i: The index of the first value to swap.
+  ///   - j: The index of the second value to swap.
+  mutating func swapAt(_ i: Index, _ j: Index)
+  
   /// Call `body(p)`, where `p` is a pointer to the collection's
   /// mutable contiguous storage.  If no such storage exists, it is
   /// first created.  If the collection does not support an internal
@@ -272,9 +311,9 @@ public protocol MutableCollection : MutableIndexable, Collection {
   /// same algorithm on `body`\ 's argument lets you trade safety for
   /// speed.
   mutating func _withUnsafeMutableBufferPointerIfSupported<R>(
-    _ body: @noescape (UnsafeMutablePointer<Iterator.Element>, Int) throws -> R
+    _ body: (UnsafeMutablePointer<Element>, Int) throws -> R
   ) rethrows -> R?
-  // FIXME(ABI)(compiler limitation): the signature should use
+  // FIXME(ABI)#53 (Type Checker): the signature should use
   // UnsafeMutableBufferPointer, but the compiler can't handle that.
   //
   // <rdar://problem/21933004> Restore the signature of
@@ -284,8 +323,9 @@ public protocol MutableCollection : MutableIndexable, Collection {
 
 // TODO: swift-3-indexing-model - review the following
 extension MutableCollection {
+  @_inlineable
   public mutating func _withUnsafeMutableBufferPointerIfSupported<R>(
-    _ body: @noescape (UnsafeMutablePointer<Iterator.Element>, Int) throws -> R
+    _ body: (UnsafeMutablePointer<Element>, Int) throws -> R
   ) rethrows -> R? {
     return nil
   }
@@ -312,10 +352,52 @@ extension MutableCollection {
   ///
   /// - Parameter bounds: A range of the collection's indices. The bounds of
   ///   the range must be valid indices of the collection.
+  @_inlineable
   public subscript(bounds: Range<Index>) -> MutableSlice<Self> {
     get {
       _failEarlyRangeCheck(bounds, bounds: startIndex..<endIndex)
       return MutableSlice(base: self, bounds: bounds)
+    }
+    set {
+      _writeBackMutableSlice(&self, bounds: bounds, slice: newValue)
+    }
+  }
+
+  /// Exchanges the values at the specified indices of the collection.
+  ///
+  /// Both parameters must be valid indices of the collection that are not
+  /// equal to `endIndex`. Calling `swapAt(_:_:)` with the same index as both
+  /// `i` and `j` has no effect.
+  ///
+  /// - Parameters:
+  ///   - i: The index of the first value to swap.
+  ///   - j: The index of the second value to swap.
+  @_inlineable
+  public mutating func swapAt(_ i: Index, _ j: Index) {
+    guard i != j else { return }
+    let tmp = self[i]
+    self[i] = self[j]
+    self[j] = tmp
+  }
+}
+
+extension MutableCollection where Self: BidirectionalCollection {
+  public subscript(bounds: Range<Index>) -> MutableBidirectionalSlice<Self> {
+    get {
+      _failEarlyRangeCheck(bounds, bounds: startIndex..<endIndex)
+      return MutableBidirectionalSlice(base: self, bounds: bounds)
+    }
+    set {
+      _writeBackMutableSlice(&self, bounds: bounds, slice: newValue)
+    }
+  }
+}
+
+extension MutableCollection where Self: RandomAccessCollection {
+  public subscript(bounds: Range<Index>) -> MutableRandomAccessSlice<Self> {
+    get {
+      _failEarlyRangeCheck(bounds, bounds: startIndex..<endIndex)
+      return MutableRandomAccessSlice(base: self, bounds: bounds)
     }
     set {
       _writeBackMutableSlice(&self, bounds: bounds, slice: newValue)

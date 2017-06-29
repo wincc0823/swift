@@ -1,6 +1,6 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
-var func5 : (fn : (Int,Int) -> ()) -> () 
+var func5 : (_ fn : (Int,Int) -> ()) -> () 
 
 // Default arguments for functions.
 func foo3(a: Int = 2, b: Int = 3) {}
@@ -40,17 +40,17 @@ Ctor(f:12.5) // expected-warning{{unused}}
 
 // Default arguments for nested constructors/functions.
 struct Outer<T> {
-  struct Inner { // expected-error{{type 'Inner' nested in generic type}}
-    struct VeryInner {// expected-error{{type 'VeryInner' nested in generic type}}
+  struct Inner {
+    struct VeryInner {
       init (i : Int = 17, f : Float = 1.5) { }
       static func f(i: Int = 17, f: Float = 1.5) { }
       func g(i: Int = 17, f: Float = 1.5) { }
     }
   }
 }
-Outer<Int>.Inner.VeryInner() // expected-warning{{unused}}
-Outer<Int>.Inner.VeryInner(i: 12) // expected-warning{{unused}}
-Outer<Int>.Inner.VeryInner(f:12.5) // expected-warning{{unused}}
+_ = Outer<Int>.Inner.VeryInner()
+_ = Outer<Int>.Inner.VeryInner(i: 12)
+_ = Outer<Int>.Inner.VeryInner(f:12.5)
 Outer<Int>.Inner.VeryInner.f()
 Outer<Int>.Inner.VeryInner.f(i: 12)
 Outer<Int>.Inner.VeryInner.f(f:12.5)
@@ -111,3 +111,14 @@ foo2([].bar { $0 == "c" }!)
 // rdar://problem/21643052
 let a = ["1", "2"].map { Int($0) }
 
+// Default arguments for static members used via ".foo"
+struct X<T> {
+  static func foo(i: Int, j: Int = 0) -> X {
+    return X()
+  }
+
+  static var bar: X { return X() }
+}
+
+let testXa: X<Int> = .foo(i: 0)
+let testXb: X<Int> = .bar

@@ -1,4 +1,4 @@
-// RUN: %target-sil-opt -enable-sil-verify-all %s -sil-combine -simplify-cfg | FileCheck %s
+// RUN: %target-sil-opt -assume-parsing-unqualified-ownership-sil -enable-sil-verify-all %s -sil-combine -simplify-cfg | %FileCheck %s
 
 sil_stage canonical
 
@@ -6,7 +6,7 @@ import Builtin
 import Swift
 
 // CHECK-LABEL: sil  @convert_inject_enum_addr_select_enum_addr_into_cond_br : $@convention(thin) (@in Int, @inout _Stdout) -> ()
-// CHECK: unconditional_checked_cast_addr
+// CHECK: init_existential_addr
 // CHECK: inject_enum_addr
 // CHECK-NOT: select_enum_addr
 // CHECK-NOT: bb1
@@ -42,7 +42,7 @@ bb2:
 
 
 // CHECK-LABEL: sil  @convert_inject_enum_addr_switch_enum_addr_into_cond_br : $@convention(thin) (@in Int, @inout _Stdout) -> ()
-// CHECK: unconditional_checked_cast_addr
+// CHECK: init_existential_addr
 // CHECK: inject_enum_addr
 // CHECK-NOT: switch_enum_addr
 // CHECK-NOT: bb1
@@ -132,7 +132,7 @@ private class D : C {
 
 // Check that a checked_cast_addr_br converting a known type into a protocol type
 // is performed at the compile-time if protocol conformances are statically known.
-// In a negative case, take care that check for internal types are not folded (unless 
+// In a negative case, take care that check for internal types are not folded (unless
 // a whole module optimization is used), because an extension implementing a conformance
 // could be defined elsewhere.
 //

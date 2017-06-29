@@ -1,5 +1,5 @@
 // rdar://problem/23727705:
-// RUN-DISABLED: %target-swift-frontend -O %s -disable-llvm-optzns -emit-ir -g -o - | FileCheck %s
+// RUN-DISABLED: %target-swift-frontend -O %s -disable-llvm-optzns -emit-ir -g -o - | %FileCheck %s
 import StdlibUnittest
 
 // CHECK: define {{.*}}i1 {{.*}}4main4sort
@@ -21,7 +21,7 @@ public func sort(_ a: String, b: String) -> Bool {
 
 public func demo() {
     let names = ["Sean", "Barry", "Kate"]
-    let sortedNames = names.sorted(isOrderedBefore: sort)
+    let sortedNames = names.sorted(by: sort)
     var sortedNamesAsString : String = String()
     for name in sortedNames {
         sortedNamesAsString += ("\(name), ")
@@ -31,7 +31,7 @@ public func demo() {
 demo()
 
 // At -O0, we should have a single aggregate argument.
-// RUN: %target-swift-frontend %s -emit-ir -g -o - | FileCheck %s --check-prefix=CHECK-O0
+// RUN: %target-swift-frontend %s -emit-ir -g -o - | %FileCheck %s --check-prefix=CHECK-O0
 // Verify that a reabstraction thunk does not have a line number.
 // CHECK-O0-NOT: DW_OP_bit_piece
 // CHECK-O0-NOT: DW_OP_bit_piece
@@ -39,4 +39,4 @@ demo()
 // CHECK-O0-NOT: DW_OP_bit_piece
 // CHECK-O0: !DILocalVariable(name: "b", arg: 2{{.*}} line: 17,
 // CHECK-O0-NOT: DW_OP_bit_piece
-// CHECK-O0: !DISubprogram(linkageName: "_TTRXFo_oSSoSS_dSb_XFo_iSSiSS_dSb_",
+// CHECK-O0: !DISubprogram(linkageName: "_T0S2SSbs5Error_pIxxxdzo_S2SSbsAA_pIxiidzo_TR",

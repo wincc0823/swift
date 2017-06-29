@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,6 +19,7 @@
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/SIL/Dominance.h"
 #include "swift/SIL/SILModule.h"
+#include "swift/SIL/SILOpenedArchetypesTracker.h"
 #include "swift/SIL/SILType.h"
 #include "swift/SIL/SILValue.h"
 #include "swift/SIL/SILVisitor.h"
@@ -132,6 +133,10 @@ public:
     return llvm::hash_combine(X->getKind(), X->getOperand(), X->getField());
   }
 
+  hash_code visitRefTailAddrInst(RefTailAddrInst *X) {
+    return llvm::hash_combine(X->getKind(), X->getOperand());
+  }
+
   hash_code visitProjectBoxInst(ProjectBoxInst *X) {
     return llvm::hash_combine(X->getKind(), X->getOperand());
   }
@@ -234,7 +239,8 @@ public:
   }
 
   hash_code visitPointerToAddressInst(PointerToAddressInst *X) {
-    return llvm::hash_combine(X->getKind(), X->getType(), X->getOperand());
+    return llvm::hash_combine(X->getKind(), X->getType(), X->getOperand(),
+                              X->isStrict());
   }
 
   hash_code visitAddressToPointerInst(AddressToPointerInst *X) {
@@ -356,10 +362,25 @@ public:
                               X->getMember().getHashCode(),
                               X->getConformance(),
                               X->getType(),
-                              X->hasOperand(),
+                              !X->getTypeDependentOperands().empty(),
                               llvm::hash_combine_range(
                               Operands.begin(),
                               Operands.end()));
+  }
+
+  hash_code visitMarkDependenceInst(MarkDependenceInst *X) {
+    OperandValueArrayRef Operands(X->getAllOperands());
+    return llvm::hash_combine(
+        X->getKind(), X->getType(),
+        llvm::hash_combine_range(Operands.begin(), Operands.end()));
+  }
+
+  hash_code visitOpenExistentialRefInst(OpenExistentialRefInst *X) {
+    auto ArchetypeTy = X->getType().castTo<ArchetypeType>();
+    auto ConformsTo = ArchetypeTy->getConformsTo();
+    return llvm::hash_combine(
+        X->getKind(), X->getOperand(),
+        llvm::hash_combine_range(ConformsTo.begin(), ConformsTo.end()));
   }
 };
 } // end anonymous namespace
@@ -374,6 +395,23 @@ bool llvm::DenseMapInfo<SimpleValue>::isEqual(SimpleValue LHS,
   if (LHS.isSentinel() || RHS.isSentinel())
     return LHSI == RHSI;
 
+  if (isa<OpenExistentialRefInst>(LHSI) && isa<OpenExistentialRefInst>(RHSI)) {
+    if (LHSI->getNumOperands() != RHSI->getNumOperands())
+      return false;
+
+    // Check operands.
+    for (unsigned i = 0, e = LHSI->getNumOperands(); i != e; ++i)
+      if (LHSI->getOperand(i) !=  RHSI->getOperand(i))
+        return false;
+
+    // Consider the types of two open_existential_ref instructions to be equal,
+    // if the sets of protocols they conform to are equal.
+    auto LHSArchetypeTy = LHSI->getType().castTo<ArchetypeType>();
+    auto LHSConformsTo = LHSArchetypeTy->getConformsTo();
+    auto RHSArchetypeTy = RHSI->getType().castTo<ArchetypeType>();
+    auto RHSConformsTo = RHSArchetypeTy->getConformsTo();
+    return LHSConformsTo == RHSConformsTo;
+  }
   return LHSI->getKind() == RHSI->getKind() && LHSI->isIdenticalTo(RHSI);
 }
 
@@ -381,7 +419,7 @@ bool llvm::DenseMapInfo<SimpleValue>::isEqual(SimpleValue LHS,
 //                               CSE Interface
 //===----------------------------------------------------------------------===//
 
-namespace {
+namespace swift {
 
 /// CSE - This pass does a simple depth-first walk over the dominator tree,
 /// eliminating trivially redundant instructions and using simplifyInstruction
@@ -469,8 +507,10 @@ private:
   };
 
   bool processNode(DominanceInfoNode *Node);
+  bool processOpenExistentialRef(SILInstruction *Inst, ValueBase *V,
+                                 SILBasicBlock::iterator &I);
 };
-}  // end anonymous namespace
+} // namespace swift
 
 //===----------------------------------------------------------------------===//
 //                             CSE Implementation
@@ -516,6 +556,189 @@ bool CSE::processFunction(SILFunction &Fm, DominanceInfo *DT) {
   } // while (!nodes...)
 
   return Changed;
+}
+
+namespace {
+  // A very simple cloner for cloning instructions inside
+  // the same function. The only interesting thing it does
+  // is remapping the archetypes when it is required.
+  class InstructionCloner : public SILCloner<InstructionCloner> {
+    friend class SILCloner<InstructionCloner>;
+    friend class SILVisitor<InstructionCloner>;
+    SILInstruction *Result = nullptr;
+  public:
+    InstructionCloner(SILFunction *F) : SILCloner(*F) {}
+
+    static SILInstruction *doIt(SILInstruction *I) {
+      InstructionCloner TC(I->getFunction());
+      return TC.clone(I);
+    }
+
+    SILInstruction *clone(SILInstruction *I) {
+      visit(I);
+      return Result;
+    }
+
+    void postProcess(SILInstruction *Orig, SILInstruction *Cloned) {
+      assert(Orig->getFunction() == &getBuilder().getFunction() &&
+             "cloning between functions is not supported");
+
+      Result = Cloned;
+      SILCloner<InstructionCloner>::postProcess(Orig, Cloned);
+    }
+    SILValue remapValue(SILValue Value) {
+      return Value;
+    }
+    SILBasicBlock *remapBasicBlock(SILBasicBlock *BB) { return BB; }
+  };
+} // end anonymous namespace
+
+/// Update SIL basic block's arguments types which refer to opened
+/// archetypes. Replace such types by performing type substitutions
+/// according to the provided type substitution map.
+static void updateBasicBlockArgTypes(SILBasicBlock *BB,
+                                     ArchetypeType *OldOpenedArchetype,
+                                     ArchetypeType *NewOpenedArchetype) {
+  // Check types of all BB arguments.
+  for (auto *Arg : BB->getPHIArguments()) {
+    if (!Arg->getType().hasOpenedExistential())
+      continue;
+    // Type of this BB argument uses an opened existential.
+    // Try to apply substitutions to it and if it produces a different type,
+    // use this type as new type of the BB argument.
+    auto OldArgType = Arg->getType();
+    auto NewArgType = OldArgType.subst(BB->getModule(),
+                                       [&](SubstitutableType *type) -> Type {
+                                         if (type == OldOpenedArchetype)
+                                           return NewOpenedArchetype;
+                                         return type;
+                                       },
+                                       MakeAbstractConformanceForGenericType());
+    if (NewArgType == Arg->getType())
+      continue;
+    // Replace the type of this BB argument. The type of a BBArg
+    // can only be changed using replaceBBArg, if the BBArg has no uses.
+    // So, make it look as if it has no uses.
+
+    // First collect all uses, before changing the type.
+    SmallVector<Operand *, 4> OriginalArgUses;
+    for (auto *ArgUse : Arg->getUses()) {
+      OriginalArgUses.push_back(ArgUse);
+    }
+    // Then replace all uses by an undef.
+    Arg->replaceAllUsesWith(SILUndef::get(Arg->getType(), BB->getModule()));
+    // Replace the type of the BB argument.
+    auto *NewArg = BB->replacePHIArgument(Arg->getIndex(), NewArgType,
+                                          Arg->getOwnershipKind(),
+                                          Arg->getDecl());
+    // Restore all uses to refer to the BB argument with updated type.
+    for (auto ArgUse : OriginalArgUses) {
+      ArgUse->set(NewArg);
+    }
+  }
+}
+
+/// Handle CSE of open_existential_ref instructions.
+/// Returns true if uses of open_existential_ref can
+/// be replaced by a dominating instruction.
+/// \Inst is the open_existential_ref instruction
+/// \V is the dominating open_existential_ref instruction
+/// \I is the iterator referring to the current instruction.
+bool CSE::processOpenExistentialRef(SILInstruction *Inst, ValueBase *V,
+                                    SILBasicBlock::iterator &I) {
+  assert(isa<OpenExistentialRefInst>(Inst));
+  llvm::SmallSetVector<SILInstruction *, 16> Candidates;
+  auto OldOpenedArchetype = getOpenedArchetypeOf(Inst);
+  auto NewOpenedArchetype = getOpenedArchetypeOf(dyn_cast<SILInstruction>(V));
+
+  // Collect all candidates that may contain opened archetypes
+  // that need to be replaced.
+  for (auto Use : Inst->getUses()) {
+    auto User = Use->getUser();
+    if (!User->getTypeDependentOperands().empty()) {
+      if (canHandle(User)) {
+        auto It = AvailableValues->begin(User);
+        if (It != AvailableValues->end()) {
+          return false;
+        }
+      }
+      Candidates.insert(User);
+    }
+    if (!isa<TermInst>(User))
+      continue;
+    // The current use of the opened archetype is a terminator instruction.
+    // Check if any of the successor BBs uses this opened archetype in the
+    // types of its basic block arguments. If this is the case, replace
+    // those uses by the new opened archetype.
+    auto Successors = User->getParent()->getSuccessorBlocks();
+    for (auto Successor : Successors) {
+      if (Successor->args_empty())
+        continue;
+      // If a BB has any arguments, update their types if necessary.
+      updateBasicBlockArgTypes(Successor,
+                               OldOpenedArchetype,
+                               NewOpenedArchetype);
+    }
+  }
+  // Now process candidates.
+  // TODO: Move it to CSE instance to avoid recreating it every time?
+  SILOpenedArchetypesTracker OpenedArchetypesTracker(*Inst->getFunction());
+  // Register the new archetype to be used.
+  OpenedArchetypesTracker.registerOpenedArchetypes(dyn_cast<SILInstruction>(V));
+  // Use a cloner. It makes copying the instruction and remapping of
+  // opened archetypes trivial.
+  InstructionCloner Cloner(I->getFunction());
+  Cloner.registerOpenedExistentialRemapping(
+      OldOpenedArchetype->castTo<ArchetypeType>(), NewOpenedArchetype);
+  auto &Builder = Cloner.getBuilder();
+  Builder.setOpenedArchetypesTracker(&OpenedArchetypesTracker);
+
+  llvm::SmallPtrSet<SILInstruction *, 16> Processed;
+  // Now clone each candidate and replace the opened archetype
+  // by a dominating one.
+  while (!Candidates.empty()) {
+    auto Candidate = Candidates.pop_back_val();
+    if (Processed.count(Candidate))
+      continue;
+    // True if a candidate depends on the old opened archetype.
+    bool DependsOnOldOpenedArchetype = !Candidate->getTypeDependentOperands().empty();
+    if (!Candidate->use_empty() &&
+        Candidate->getType().hasOpenedExistential()) {
+      // Check if the result type of the candidate depends on the opened
+      // existential in question.
+      auto ResultDependsOnOldOpenedArchetype =
+          Candidate->getType().getSwiftRValueType().findIf(
+              [&OldOpenedArchetype](Type t) -> bool {
+                return (CanType(t) == OldOpenedArchetype);
+              });
+      if (ResultDependsOnOldOpenedArchetype) {
+        DependsOnOldOpenedArchetype |= ResultDependsOnOldOpenedArchetype;
+        // We need to update uses of this candidate, because their types
+        // may be affected.
+        for (auto Use : Candidate->getUses()) {
+          Candidates.insert(Use->getUser());
+        }
+      }
+    }
+    // Remember that this candidate was processed already.
+    Processed.insert(Candidate);
+
+    // No need to clone if there is no dependency on the old opened archetype.
+    if (!DependsOnOldOpenedArchetype)
+      continue;
+
+    Builder.getOpenedArchetypes().addOpenedArchetypeOperands(
+        Candidate->getTypeDependentOperands());
+    Builder.setInsertionPoint(Candidate);
+    auto NewI = Cloner.clone(Candidate);
+    // Result types of candidate's uses instructions may be using this archetype.
+    // Thus, we need to try to replace it there.
+    Candidate->replaceAllUsesWith(NewI);
+    if (I == Candidate->getIterator())
+      I = NewI->getIterator();
+    eraseFromParentWithDebugInsts(Candidate, I);
+  }
+  return true;
 }
 
 bool CSE::processNode(DominanceInfoNode *Node) {
@@ -565,11 +788,17 @@ bool CSE::processNode(DominanceInfoNode *Node) {
     // instruction has an available value.  If so, use it.
     if (ValueBase *V = AvailableValues->lookup(Inst)) {
       DEBUG(llvm::dbgs() << "SILCSE CSE: " << *Inst << "  to: " << *V << '\n');
-      Inst->replaceAllUsesWith(V);
-      Inst->eraseFromParent();
-      Changed = true;
-      ++NumCSE;
-      continue;
+      // Instructions producing a new opened archetype need a special handling,
+      // because replacing these instructions may require a replacement
+      // of the opened archetype type operands in some of the uses.
+      if (!isa<OpenExistentialRefInst>(Inst) ||
+          processOpenExistentialRef(Inst, V, I)) {
+        Inst->replaceAllUsesWith(V);
+        Inst->eraseFromParent();
+        Changed = true;
+        ++NumCSE;
+        continue;
+      }
     }
 
     // Otherwise, just remember that this value is available.
@@ -593,10 +822,7 @@ bool CSE::canHandle(SILInstruction *Inst) {
         case ArrayCallKind::kGetCapacity:
         case ArrayCallKind::kCheckIndex:
         case ArrayCallKind::kCheckSubscript:
-          if (SemCall.hasGuaranteedSelf()) {
-            return true;
-          }
-          return false;
+          return SemCall.hasGuaranteedSelf();
         default:
           return false;
       }
@@ -648,6 +874,7 @@ bool CSE::canHandle(SILInstruction *Inst) {
     case ValueKind::ValueMetatypeInst:
     case ValueKind::ObjCProtocolInst:
     case ValueKind::RefElementAddrInst:
+    case ValueKind::RefTailAddrInst:
     case ValueKind::ProjectBoxInst:
     case ValueKind::IndexRawPointerInst:
     case ValueKind::IndexAddrInst:
@@ -679,6 +906,8 @@ bool CSE::canHandle(SILInstruction *Inst) {
     case ValueKind::BridgeObjectToWordInst:
     case ValueKind::ThinFunctionToPointerInst:
     case ValueKind::PointerToThinFunctionInst:
+    case ValueKind::MarkDependenceInst:
+    case ValueKind::OpenExistentialRefInst:
       return true;
     default:
       return false;
@@ -697,6 +926,9 @@ static ApplyWitnessPair getOpenExistentialUsers(OpenExistentialAddrInst *OE) {
 
   for (auto *UI : getNonDebugUses(OE)) {
     auto *User = UI->getUser();
+    if (!isa<WitnessMethodInst>(User) &&
+        User->isTypeDependentOperand(UI->getOperandNumber()))
+      continue;
     // Check that we have a single Apply user.
     if (auto *AA = dyn_cast<ApplyInst>(User)) {
       if (AI)
@@ -760,6 +992,10 @@ static bool tryToCSEOpenExtCall(OpenExistentialAddrInst *From,
     return false;
 
   SILBuilder Builder(FromAI);
+  // Make archetypes used by the ToAI available to the builder.
+  SILOpenedArchetypesTracker OpenedArchetypesTracker(*FromAI->getFunction());
+  OpenedArchetypesTracker.registerUsedOpenedArchetypes(ToAI);
+  Builder.setOpenedArchetypesTracker(&OpenedArchetypesTracker);
 
   assert(FromAI->getArguments().size() == ToAI->getArguments().size() &&
          "Invalid number of arguments");
@@ -773,10 +1009,7 @@ static bool tryToCSEOpenExtCall(OpenExistentialAddrInst *From,
       Args.push_back(Op == From ? To : Op);
   }
 
-  auto FnTy = ToAI->getSubstCalleeSILType();
-  auto ResTy = FnTy.castTo<SILFunctionType>()->getSILResult();
-
-  ApplyInst *NAI = Builder.createApply(ToAI->getLoc(), ToWMI, FnTy, ResTy,
+  ApplyInst *NAI = Builder.createApply(ToAI->getLoc(), ToWMI,
                                        ToAI->getSubstitutions(), Args,
                                        ToAI->isNonThrowing());
   FromAI->replaceAllUsesWith(NAI);
@@ -787,7 +1020,8 @@ static bool tryToCSEOpenExtCall(OpenExistentialAddrInst *From,
 
 /// Try to CSE the users of the protocol that's passed in argument \p Arg.
 /// \returns True if some instructions were modified.
-static bool CSExistentialInstructions(SILArgument *Arg, DominanceInfo *DA) {
+static bool CSExistentialInstructions(SILFunctionArgument *Arg,
+                                      DominanceInfo *DA) {
   ParameterConvention Conv = Arg->getKnownParameterInfo().getConvention();
   // We can assume that the address of Proto does not alias because the
   // calling convention is In or In-guaranteed.
@@ -874,8 +1108,10 @@ static bool CSExistentialInstructions(SILArgument *Arg, DominanceInfo *DA) {
 static bool CSEExistentialCalls(SILFunction *Func, DominanceInfo *DA) {
   bool Changed = false;
   for (auto *Arg : Func->getArgumentsWithoutIndirectResults()) {
-    if (Arg->getType().isExistentialType())
-      Changed |= CSExistentialInstructions(Arg, DA);
+    if (Arg->getType().isExistentialType()) {
+      auto *FArg = cast<SILFunctionArgument>(Arg);
+      Changed |= CSExistentialInstructions(FArg, DA);
+    }
   }
 
   return Changed;
@@ -912,10 +1148,6 @@ class SILCSE : public SILFunctionTransform {
     }
   }
 
-  StringRef getName() override {
-    return RunsOnHighLevelSil ? "High-level CSE" : "CSE";
-  }
-  
 public:
   SILCSE(bool RunsOnHighLevelSil) : RunsOnHighLevelSil(RunsOnHighLevelSil) {}
 };

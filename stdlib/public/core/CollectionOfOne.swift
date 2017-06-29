@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -19,12 +19,13 @@ public struct IteratorOverOne<Element> : IteratorProtocol, Sequence {
     self._elements = _elements
   }
 
-  /// Advance to the next element and return it, or `nil` if no next
-  /// element exists.
+  /// Advances to the next element and returns it, or `nil` if no next element
+  /// exists.
+  ///
+  /// Once `nil` has been returned, all subsequent calls return `nil`.
   ///
   /// - Precondition: `next()` has not been applied to a copy of `self`
-  ///   since the copy was made, and no preceding call to `self.next()`
-  ///   has returned `nil`.
+  ///   since the copy was made.
   public mutating func next() -> Element? {
     let result = _elements
     _elements = nil
@@ -38,7 +39,7 @@ public struct IteratorOverOne<Element> : IteratorProtocol, Sequence {
 public struct CollectionOfOne<Element>
   : MutableCollection, RandomAccessCollection {
 
-  /// Construct an instance containing just `element`.
+  /// Creates an instance containing just `element`.
   public init(_ element: Element) {
     self._element = element
   }
@@ -50,23 +51,22 @@ public struct CollectionOfOne<Element>
     return 0
   }
 
-  /// The "past the end" position; always identical to
-  /// `index(after: startIndex)`.
+  /// The "past the end" position---that is, the position one greater than the
+  /// last valid subscript argument.
   ///
-  /// - Note: `endIndex` is not a valid argument to `subscript`.
+  /// In a `CollectionOfOne` instance, `endIndex` is always identical to
+  /// `index(after: startIndex)`.
   public var endIndex: Int {
     return 1
   }
   
   /// Always returns `endIndex`.
-  @warn_unused_result
   public func index(after i: Int) -> Int {
     _precondition(i == startIndex)
     return endIndex
   }
 
   /// Always returns `startIndex`.
-  @warn_unused_result
   public func index(before i: Int) -> Int {
     _precondition(i == endIndex)
     return startIndex
@@ -81,7 +81,7 @@ public struct CollectionOfOne<Element>
     return IteratorOverOne(_elements: _element)
   }
 
-  /// Access the element at `position`.
+  /// Accesses the element at `position`.
   ///
   /// - Precondition: `position == 0`.
   public subscript(position: Int) -> Element {
@@ -136,7 +136,7 @@ extension CollectionOfOne : CustomReflectable {
 public struct GeneratorOfOne<Element> {}
 
 extension IteratorOverOne {
-  @available(*, unavailable, renamed: "makeIterator")
+  @available(*, unavailable, renamed: "makeIterator()")
   public func generate() -> IteratorOverOne<Element> {
     Builtin.unreachable()
   }

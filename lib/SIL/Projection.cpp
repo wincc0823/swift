@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -95,9 +95,16 @@ Projection::Projection(SILInstruction *I) : Value() {
            REAI->getType());
     break;
   }
+  case ValueKind::RefTailAddrInst: {
+    auto *RTAI = cast<RefTailAddrInst>(I);
+    auto *Ty = RTAI->getTailType().getSwiftRValueType().getPointer();
+    Value = ValueTy(ProjectionKind::TailElems, Ty);
+    assert(getKind() == ProjectionKind::TailElems);
+    break;
+  }
   case ValueKind::ProjectBoxInst: {
     auto *PBI = cast<ProjectBoxInst>(I);
-    Value = ValueTy(ProjectionKind::Box, (unsigned)0);
+    Value = ValueTy(ProjectionKind::Box, static_cast<uintptr_t>(0));
     assert(getKind() == ProjectionKind::Box);
     assert(getIndex() == 0);
     assert(getType(PBI->getOperand()->getType(), PBI->getModule()) ==
@@ -147,11 +154,9 @@ Projection::Projection(SILInstruction *I) : Value() {
     // updated and a MaxLargeIndex will need to be used here. Currently we
     // represent large Indexes using a 64 bit integer, so we don't need to mess
     // with anything.
-    unsigned NewIndex = ~0;
+    unsigned NewIndex = 0;
     auto *IAI = cast<IndexAddrInst>(I);
     if (getIntegerIndex(IAI->getIndex(), NewIndex)) {
-      assert(NewIndex != unsigned(~0) && "NewIndex should have been changed "
-                                         "by getIntegerIndex?!");
       Value = ValueTy(ProjectionKind::Index, NewIndex);
       assert(getKind() == ProjectionKind::Index);
       assert(getIndex() == NewIndex);
@@ -212,6 +217,8 @@ Projection::createObjectProjection(SILBuilder &B, SILLocation Loc,
     return B.createUncheckedEnumData(Loc, Base, getEnumElementDecl(BaseTy));
   case ProjectionKind::Class:
     return nullptr;
+  case ProjectionKind::TailElems:
+    return nullptr;
   case ProjectionKind::Box:
     return nullptr;
   case ProjectionKind::Upcast:
@@ -221,6 +228,8 @@ Projection::createObjectProjection(SILBuilder &B, SILLocation Loc,
   case ProjectionKind::BitwiseCast:
     return B.createUncheckedBitwiseCast(Loc, Base, getCastType(BaseTy));
   }
+
+  llvm_unreachable("Unhandled ProjectionKind in switch.");
 }
 
 NullablePtr<SILInstruction>
@@ -253,14 +262,18 @@ Projection::createAddressProjection(SILBuilder &B, SILLocation Loc,
                                              getEnumElementDecl(BaseTy));
   case ProjectionKind::Class:
     return B.createRefElementAddr(Loc, Base, getVarDecl(BaseTy));
+  case ProjectionKind::TailElems:
+    return B.createRefTailAddr(Loc, Base, getCastType(BaseTy));
   case ProjectionKind::Box:
-    return B.createProjectBox(Loc, Base);
+    return B.createProjectBox(Loc, Base, getIndex());
   case ProjectionKind::Upcast:
     return B.createUpcast(Loc, Base, getCastType(BaseTy));
   case ProjectionKind::RefCast:
   case ProjectionKind::BitwiseCast:
     return B.createUncheckedAddrCast(Loc, Base, getCastType(BaseTy));
   }
+
+  llvm_unreachable("Unhandled ProjectionKind in switch.");
 }
 
 void Projection::getFirstLevelProjections(SILType Ty, SILModule &Mod,
@@ -309,15 +322,16 @@ void Projection::getFirstLevelProjections(SILType Ty, SILModule &Mod,
   }
 
   if (auto Box = Ty.getAs<SILBoxType>()) {
-    Projection P(ProjectionKind::Box, (unsigned)0);
-    DEBUG(ProjectionPath X(Ty);
-          assert(X.getMostDerivedType(Mod) == Ty);
-          X.append(P);
-          assert(X.getMostDerivedType(Mod) == SILType::getPrimitiveAddressType(
-                                                Box->getBoxedType()));
-          X.verify(Mod););
-    (void) Box;
-    Out.push_back(P);
+    for (unsigned field : indices(Box->getLayout()->getFields())) {
+      Projection P(ProjectionKind::Box, field);
+      DEBUG(ProjectionPath X(Ty);
+            assert(X.getMostDerivedType(Mod) == Ty);
+            X.append(P);
+            assert(X.getMostDerivedType(Mod) == Box->getFieldType(Mod, field));
+            X.verify(Mod););
+      (void)Box;
+      Out.push_back(P);
+    }
     return;
   }
 }
@@ -517,87 +531,59 @@ ProjectionPath::removePrefix(const ProjectionPath &Path,
 }
 
 raw_ostream &ProjectionPath::print(raw_ostream &os, SILModule &M) {
-  // Match how the memlocation print tests expect us to print projection paths.
-  //
-  // TODO: It sort of sucks having to print these bottom up computationally. We
-  // should really change the test so that prints out the path elements top
-  // down the path, rather than constructing all of these intermediate paths.
-  for (unsigned i : reversed(indices(Path))) {
-    SILType IterType = getDerivedType(i, M);
-    auto &IterProj = Path[i];
-    os << "Address Projection Type: ";
+  os << "Projection Path [";
+  SILType IterType = getBaseType();
+  for (const Projection &IterProj : Path) {
+    SILType BaseType = IterType;
+    IterType = IterProj.getType(IterType, M);
+
+    os << BaseType.getAddressType() << "\n  ";
+
     if (IterProj.isNominalKind()) {
-      auto *Decl = IterProj.getVarDecl(IterType);
-      IterType = IterProj.getType(IterType, M);
-      os << IterType.getAddressType() << "\n";
-      os << "Field Type: ";
+      auto *Decl = IterProj.getVarDecl(BaseType);
+      os << "Field: ";
       Decl->print(os);
-      os << "\n";
+      os << " of: ";
       continue;
     }
 
     if (IterProj.getKind() == ProjectionKind::Tuple) {
-      IterType = IterProj.getType(IterType, M);
-      os << IterType.getAddressType() << "\n";
-      os << "Index: ";
-      os << IterProj.getIndex() << "\n";
+      os << "Index: " << IterProj.getIndex() << " into: ";
       continue;
     }
 
+    if (IterProj.getKind() == ProjectionKind::BitwiseCast) {
+      os << "BitwiseCast to: ";
+      continue;
+    }
+    if (IterProj.getKind() == ProjectionKind::Index) {
+      os << "Index: " << IterProj.getIndex() << " into: ";
+      continue;
+    }
+    if (IterProj.getKind() == ProjectionKind::Upcast) {
+      os << "UpCast to: ";
+      continue;
+    }
+    if (IterProj.getKind() == ProjectionKind::RefCast) {
+      os << "RefCast to: ";
+      continue;
+    }
     if (IterProj.getKind() == ProjectionKind::Box) {
-      os << "Box: ";
+      os << " Box over: ";
       continue;
     }
-
-    llvm_unreachable("Can not print this projection kind");
-  }
-
-// Migrate the tests to this format eventually.
-#if 0
-  os << "(Projection Path [";
-  SILType NextType = BaseType;
-  os << NextType;
-  for (const Projection &P : Path) {
-    os << ", ";
-    NextType = P.getType(NextType, M);
-    os << NextType;
-  }
-  os << "]";
-#endif
-  return os;
-}
-
-raw_ostream &ProjectionPath::printProjections(raw_ostream &os, SILModule &M) const {
-  // Match how the memlocation print tests expect us to print projection paths.
-  //
-  // TODO: It sort of sucks having to print these bottom up computationally. We
-  // should really change the test so that prints out the path elements top
-  // down the path, rather than constructing all of these intermediate paths.
-  for (unsigned i : reversed(indices(Path))) {
-    auto &IterProj = Path[i];
-    if (IterProj.isNominalKind()) {
-      os << "Field Type: " << IterProj.getIndex() << "\n";
+    if (IterProj.getKind() == ProjectionKind::TailElems) {
+      os << " TailElems of: ";
       continue;
     }
-
-    if (IterProj.getKind() == ProjectionKind::Tuple) {
-      os << "Index: " << IterProj.getIndex() << "\n";
-      continue;
-    }
-
-    llvm_unreachable("Can not print this projection kind");
+    os << "<unexpected projection> into: ";
   }
-
+  os << IterType.getAddressType() << "]\n";
   return os;
 }
 
 void ProjectionPath::dump(SILModule &M) {
-  print(llvm::outs(), M);
-  llvm::outs() << "\n";
-}
-
-void ProjectionPath::dumpProjections(SILModule &M) const {
-  printProjections(llvm::outs(), M);
+  print(llvm::dbgs(), M);
 }
 
 void ProjectionPath::verify(SILModule &M) {
@@ -817,7 +803,7 @@ SILValue Projection::getOperandForAggregate(SILInstruction *I) const {
     case ProjectionKind::Index:
       break;
     case ProjectionKind::Enum:
-      if (EnumInst *EI = dyn_cast<EnumInst>(I)) {
+      if (auto *EI = dyn_cast<EnumInst>(I)) {
         if (EI->getElement() == getEnumElementDecl(I->getType())) {
           assert(EI->hasOperand() && "expected data operand");
           return EI->getOperand();
@@ -825,6 +811,7 @@ SILValue Projection::getOperandForAggregate(SILInstruction *I) const {
       }
       break;
     case ProjectionKind::Class:
+    case ProjectionKind::TailElems:
     case ProjectionKind::Box:
     case ProjectionKind::Upcast:
     case ProjectionKind::RefCast:
@@ -875,25 +862,11 @@ createProjection(SILBuilder &B, SILLocation Loc, SILValue Arg) const {
   return Proj->createProjection(B, Loc, Arg);
 }
 
-std::string
-ProjectionTreeNode::getNameEncoding(const ProjectionTree &PT) const {
-  std::string Encoding;
-  const ProjectionTreeNode *Node = this;
-  while (Node) {
-    if (Node->isRoot())
-      break;
-    Encoding += std::to_string(Node->Proj->getIndex());
-    Node = Node->getParent(PT);
-  }
-  return Encoding;
-}
-
 void
 ProjectionTreeNode::
 processUsersOfValue(ProjectionTree &Tree,
                     llvm::SmallVectorImpl<ValueNodePair> &Worklist,
-                    SILValue Value, LivenessKind Kind,
-                    llvm::DenseSet<SILInstruction *> &Releases) {
+                    SILValue Value) {
   DEBUG(llvm::dbgs() << "    Looking at Users:\n");
 
   // For all uses of V...
@@ -904,20 +877,13 @@ processUsersOfValue(ProjectionTree &Tree,
     DEBUG(llvm::dbgs() << "        " << *User);
 
     // First try to create a Projection for User.
-    auto P = Projection::Projection(User);
+    auto P = Projection(User);
 
     // If we fail to create a projection, add User as a user to this node and
     // continue.
     if (!P.isValid()) {
       DEBUG(llvm::dbgs() << "            Failed to create projection. Adding "
             "to non projection user!\n");
-      // Is the user an epilogue release ?
-      if (Kind == IgnoreEpilogueReleases) {
-        bool EpilogueReleaseUser = !Releases.empty();
-        EpilogueReleaseUser &= Releases.find(User) != Releases.end();
-        if (EpilogueReleaseUser)
-          continue;
-      }
       addNonProjectionUser(Op);
       continue;
     }
@@ -949,12 +915,6 @@ processUsersOfValue(ProjectionTree &Tree,
       // The only projection which we do not currently handle are enums since we
       // may not know the correct case. This can be extended in the future.
       // Is the user an epilogue release ?
-      if (Kind == IgnoreEpilogueReleases) {
-        bool EpilogueReleaseUser = !Releases.empty();
-        EpilogueReleaseUser &= Releases.find(User) != Releases.end();
-        if (EpilogueReleaseUser)
-          continue;
-      }
       addNonProjectionUser(Op);
     }
   }
@@ -1044,7 +1004,7 @@ createAggregate(SILBuilder &B, SILLocation Loc, ArrayRef<SILValue> Args) const {
     return B.createStruct(Loc, Ty, Args);
   }
 
-  if (Ty.getAs<TupleType>()) {
+  if (Ty.is<TupleType>()) {
     return B.createTuple(Loc, Ty, Args);
   }
 
@@ -1156,22 +1116,7 @@ public:
 //===----------------------------------------------------------------------===//
 
 ProjectionTree::
-ProjectionTree(SILModule &Mod, llvm::BumpPtrAllocator &BPA, SILType BaseTy) 
-  : Mod(Mod), Allocator(BPA),
-    Kind(ProjectionTreeNode::LivenessKind::NormalUseLiveness) {
-  DEBUG(llvm::dbgs() << "Constructing Projection Tree For : " << BaseTy);
-
-  // Create the root node of the tree with our base type.
-  createRoot(BaseTy);
-
-  // Create the rest of the type tree lazily based on uses.
-}
-
-ProjectionTree::
-ProjectionTree(SILModule &Mod, llvm::BumpPtrAllocator &BPA, SILType BaseTy,
-               ProjectionTreeNode::LivenessKind Kind,
-               llvm::DenseSet<SILInstruction *> Insts)
-  : Mod(Mod), Allocator(BPA), Kind(Kind), EpilogueReleases(Insts) {
+ProjectionTree(SILModule &Mod, SILType BaseTy) : Mod(Mod) {
   DEBUG(llvm::dbgs() << "Constructing Projection Tree For : " << BaseTy);
 
   // Create the root node of the tree with our base type.
@@ -1183,25 +1128,6 @@ ProjectionTree(SILModule &Mod, llvm::BumpPtrAllocator &BPA, SILType BaseTy,
 ProjectionTree::~ProjectionTree() {
   // Do nothing !. Eventually the all the projection tree nodes will be freed
   // when the BPA allocator is free.
-}
-
-void
-ProjectionTree::initializeWithExistingTree(const ProjectionTree &PT) {
-  Kind = PT.Kind;
-  EpilogueReleases = PT.EpilogueReleases;
-  LiveLeafIndices = PT.LiveLeafIndices;
-  for (const auto &N : PT.ProjectionTreeNodes) {
-    ProjectionTreeNodes.push_back(new (Allocator) ProjectionTreeNode(*N));
-  }
-}
-
-std::string ProjectionTree::getNameEncoding() const {
-  std::string Encoding;
-  for (unsigned index : LiveLeafIndices) {
-    const ProjectionTreeNode *Node = ProjectionTreeNodes[index];
-    Encoding += Node->getNameEncoding(*this);
-  }
-  return Encoding;
 }
 
 SILValue
@@ -1285,7 +1211,7 @@ computeUsesAndLiveness(SILValue Base) {
     // If Value is not null, collate all users of Value the appropriate child
     // nodes and add such items to the worklist.
     if (Value) {
-      Node->processUsersOfValue(*this, UseWorklist, Value, Kind, EpilogueReleases);
+      Node->processUsersOfValue(*this, UseWorklist, Value);
     }
 
     // If this node is live due to a non projection user, propagate down its
@@ -1449,11 +1375,9 @@ replaceValueUsesWithLeafUses(SILBuilder &Builder, SILLocation Loc,
 
     // Grab the parent of this node.
     ProjectionTreeNode *Parent = Node->getParent(*this);
-    DEBUG(llvm::dbgs() << "        Visiting parent of leaf: " <<
-          Parent->getType() << "\n");
 
     // If the parent is dead, continue.
-    if (!Parent->IsLive) {
+    if (!Parent || !Parent->IsLive) {
       DEBUG(llvm::dbgs() << "        Parent is dead... continuing.\n");
       continue;
     }

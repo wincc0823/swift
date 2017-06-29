@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-silgen %s | FileCheck %s
+// RUN: %target-swift-frontend -emit-silgen %s | %FileCheck %s
 
 // rdar://problem/20714534 -- we need to canonicalize an associated type's
 // protocols when emitting witness method table for a conformance.
@@ -14,7 +14,7 @@ struct _S<T : _CDT> : CT {
 }
 
 extension _CDT {
-  final subscript(b: Int) -> _S<Self> {
+  subscript(b: Int) -> _S<Self> {
     return _S(a: self, b: b)
   }
 }

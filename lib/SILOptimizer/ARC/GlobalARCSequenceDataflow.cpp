@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -69,7 +69,7 @@ bool ARCSequenceDataflowEvaluator::processBBTopDown(ARCBBState &BBState) {
   // anything, we will still pair the retain, releases and then the guaranteed
   // parameter will ensure it is known safe to remove them.
   if (BB.isEntry()) {
-    auto Args = BB.getBBArgs();
+    auto Args = BB.getArguments();
     for (unsigned i = 0, e = Args.size(); i != e; ++i) {
       DataflowVisitor.visit(Args[i]);
     }
@@ -107,7 +107,7 @@ bool ARCSequenceDataflowEvaluator::processBBTopDown(ARCBBState &BBState) {
       if (Op && OtherState->first == Op)
         continue;
 
-      OtherState->second.updateForSameLoopInst(&I, &I, SetFactory, AA);
+      OtherState->second.updateForSameLoopInst(&I, SetFactory, AA);
     }
   }
 
@@ -123,7 +123,7 @@ void ARCSequenceDataflowEvaluator::mergePredecessors(
   ARCBBState &BBState = DataHandle.getState();
 
   // For each successor of BB...
-  for (SILBasicBlock *PredBB : BB->getPreds()) {
+  for (SILBasicBlock *PredBB : BB->getPredecessorBlocks()) {
 
     // Try to look up the data handle for it. If we don't have any such state,
     // then the predecessor must be unreachable from the entrance and thus is
@@ -217,9 +217,12 @@ static bool isARCSignificantTerminator(TermInst *TI) {
   case TermKind::SwitchEnumAddrInst:
   case TermKind::DynamicMethodBranchInst:
   case TermKind::CheckedCastBranchInst:
+  case TermKind::CheckedCastValueBranchInst:
   case TermKind::CheckedCastAddrBranchInst:
     return true;
   }
+
+  llvm_unreachable("Unhandled TermKind in switch.");
 }
 
 /// Analyze a single BB for refcount inc/dec instructions.
@@ -245,8 +248,8 @@ bool ARCSequenceDataflowEvaluator::processBBBottomUp(
   bool NestingDetected = false;
 
   BottomUpDataflowRCStateVisitor<ARCBBState> DataflowVisitor(
-      RCIA, BBState, FreezeOwnedArgEpilogueReleases, ConsumedArgToReleaseMap,
-      IncToDecStateMap, SetFactory);
+      RCIA, EAFI, BBState, FreezeOwnedArgEpilogueReleases, IncToDecStateMap,
+      SetFactory);
 
   // For each terminator instruction I in BB visited in reverse...
   for (auto II = std::next(BB.rbegin()), IE = BB.rend(); II != IE;) {
@@ -270,10 +273,6 @@ bool ARCSequenceDataflowEvaluator::processBBBottomUp(
     // that the instruction "visits".
     SILValue Op = Result.RCIdentity;
 
-    // If I is a use of the value that we are going to track, this is the
-    // position right after I where we would want to move the release.
-    auto *InsertPt = &*std::next(SILBasicBlock::iterator(&I));
-
     // For all other (reference counted value, ref count state) we are
     // tracking...
     for (auto &OtherState : BBState.getBottomupStates()) {
@@ -286,7 +285,7 @@ bool ARCSequenceDataflowEvaluator::processBBBottomUp(
       if (Op && OtherState->first == Op)
         continue;
 
-      OtherState->second.updateForSameLoopInst(&I, InsertPt, SetFactory, AA);
+      OtherState->second.updateForSameLoopInst(&I, SetFactory, AA);
     }
   }
 
@@ -299,20 +298,19 @@ bool ARCSequenceDataflowEvaluator::processBBBottomUp(
   // that this block could not have multiple predecessors since otherwise, the
   // edge would be broken.
   llvm::TinyPtrVector<SILInstruction *> PredTerminators;
-  for (SILBasicBlock *PredBB : BB.getPreds()) {
+  for (SILBasicBlock *PredBB : BB.getPredecessorBlocks()) {
     auto *TermInst = PredBB->getTerminator();
     if (!isARCSignificantTerminator(TermInst))
       continue;
     PredTerminators.push_back(TermInst);
   }
 
-  auto *InsertPt = &*BB.begin();
   for (auto &OtherState : BBState.getBottomupStates()) {
     // If the other state's value is blotted, skip it.
     if (!OtherState.hasValue())
       continue;
 
-    OtherState->second.updateForPredTerminators(PredTerminators, InsertPt,
+    OtherState->second.updateForPredTerminators(PredTerminators,
                                                 SetFactory, AA);
   }
 
@@ -400,15 +398,16 @@ bool ARCSequenceDataflowEvaluator::processBottomUp(
 
 ARCSequenceDataflowEvaluator::ARCSequenceDataflowEvaluator(
     SILFunction &F, AliasAnalysis *AA, PostOrderAnalysis *POA,
-    RCIdentityFunctionInfo *RCIA, ProgramTerminationFunctionInfo *PTFI,
+    RCIdentityFunctionInfo *RCIA, EpilogueARCFunctionInfo *EAFI,
+    ProgramTerminationFunctionInfo *PTFI,
     BlotMapVector<SILInstruction *, TopDownRefCountState> &DecToIncStateMap,
     BlotMapVector<SILInstruction *, BottomUpRefCountState> &IncToDecStateMap)
-    : F(F), AA(AA), POA(POA), RCIA(RCIA), DecToIncStateMap(DecToIncStateMap),
-      IncToDecStateMap(IncToDecStateMap), Allocator(), SetFactory(Allocator),
+    : F(F), AA(AA), POA(POA), RCIA(RCIA), EAFI(EAFI),
+      DecToIncStateMap(DecToIncStateMap), IncToDecStateMap(IncToDecStateMap),
+      Allocator(), SetFactory(Allocator),
       // We use a malloced pointer here so we don't need to expose
       // ARCBBStateInfo in the header.
-      BBStateInfo(new ARCBBStateInfo(&F, POA, PTFI)),
-      ConsumedArgToReleaseMap(RCIA, &F) {}
+      BBStateInfo(new ARCBBStateInfo(&F, POA, PTFI)) {}
 
 bool ARCSequenceDataflowEvaluator::run(bool FreezeOwnedReleases) {
   bool NestingDetected = processBottomUp(FreezeOwnedReleases);

@@ -2,14 +2,17 @@
 #
 # This source file is part of the Swift.org open source project
 #
-# Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+# Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 # Licensed under Apache License v2.0 with Runtime Library Exception
 #
-# See http://swift.org/LICENSE.txt for license information
-# See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+# See https://swift.org/LICENSE.txt for license information
+# See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+
+from __future__ import absolute_import
 
 import platform
-import subprocess
+
+from . import shell
 
 
 def tar(source, destination):
@@ -25,7 +28,7 @@ def tar(source, destination):
     if platform.system() != 'Darwin':
         args += ['--owner=0', '--group=0']
 
-    # Capture stderr output such as 'tar: Failed to open ...'. We'll detect
-    # these cases using the exit code, which should cause 'check_call' to
+    # Discard stderr output such as 'tar: Failed to open ...'. We'll detect
+    # these cases using the exit code, which should cause 'shell.call' to
     # raise.
-    subprocess.check_call(args + [source], stderr=subprocess.PIPE)
+    shell.call(args + [source], stderr=shell.DEVNULL)

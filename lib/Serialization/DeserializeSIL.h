@@ -2,17 +2,17 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/Serialization/ModuleFile.h"
 #include "SILFormat.h"
 #include "swift/SIL/SILModule.h"
+#include "swift/Serialization/ModuleFile.h"
 #include "swift/Serialization/SerializedSILLoader.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -82,6 +82,7 @@ namespace swift {
                                      SmallVectorImpl<uint64_t> &scratch);
     /// Read a SIL instruction within a given SIL basic block.
     bool readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
+                            SILBuilder &Builder,
                             unsigned RecordKind,
                             SmallVectorImpl<uint64_t> &scratch);
 
@@ -117,7 +118,7 @@ public:
     SILFunction *lookupSILFunction(SILFunction *InFunc);
     SILFunction *lookupSILFunction(StringRef Name,
                                    bool declarationOnly = false);
-    bool hasSILFunction(StringRef Name, SILLinkage Linkage);
+    bool hasSILFunction(StringRef Name, Optional<SILLinkage> Linkage = None);
     SILVTable *lookupVTable(Identifier Name);
     SILWitnessTable *lookupWitnessTable(SILWitnessTable *wt);
     SILDefaultWitnessTable *
@@ -140,6 +141,7 @@ public:
         Callback = nullptr;
 
       getAllSILFunctions();
+      getAllSILGlobalVariables();
       getAllVTables();
       getAllWitnessTables();
       getAllDefaultWitnessTables();
@@ -147,6 +149,10 @@ public:
 
     /// Deserialize all SILFunctions inside the module and add them to SILMod.
     void getAllSILFunctions();
+
+    /// Deserialize all SILGlobalVariables inside the module and add them to
+    /// SILMod.
+    void getAllSILGlobalVariables();
 
     /// Deserialize all VTables inside the module and add them to SILMod.
     void getAllVTables();

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -17,6 +17,8 @@
 #include "swift/Basic/UUID.h"
 #include "swift/AST/Identifier.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/Support/raw_ostream.h"
 #include "swift/AST/PrintOptions.h"
 
 namespace swift {
@@ -25,12 +27,15 @@ namespace swift {
   class DynamicSelfType;
   class ModuleEntity;
   class TypeDecl;
+  class EnumElementDecl;
   class Type;
   struct TypeLoc;
   class Pattern;
   class ExtensionDecl;
   class NominalTypeDecl;
   class ValueDecl;
+  class SourceLoc;
+  enum class tok;
 
 /// Describes the context in which a name is being printed, which
 /// affects the keywords that need to be escaped.
@@ -155,8 +160,6 @@ public:
 
   // Helper functions.
 
-  void printTypeRef(DynamicSelfType *T, Identifier Name);
-
   void printSeparator(bool &first, StringRef separator) {
     if (first) {
       first = false;
@@ -175,18 +178,32 @@ public:
 
   ASTPrinter &operator<<(DeclName name);
 
-  void printKeyword(StringRef Name) {
+  // Special case for 'char', but not arbitrary things that convert to 'char'.
+  template <typename T>
+  typename std::enable_if<std::is_same<T, char>::value, ASTPrinter &>::type
+  operator<<(T c) {
+    return *this << StringRef(&c, 1);
+  }
+
+  void printKeyword(StringRef name) {
     callPrintNamePre(PrintNameContext::Keyword);
-    *this << Name;
+    *this << name;
     printNamePost(PrintNameContext::Keyword);
   }
 
-  void printAttrName(StringRef Name, bool needAt = false) {
+  void printAttrName(StringRef name, bool needAt = false) {
     callPrintNamePre(PrintNameContext::Attribute);
     if (needAt)
       *this << "@";
-    *this << Name;
+    *this << name;
     printNamePost(PrintNameContext::Attribute);
+  }
+
+  ASTPrinter &printSimpleAttr(StringRef name, bool needAt = false) {
+    callPrintStructurePre(PrintStructureKind::BuiltinAttribute);
+    printAttrName(name, needAt);
+    printStructurePost(PrintStructureKind::BuiltinAttribute);
+    return *this;
   }
 
   void printName(Identifier Name,
@@ -258,8 +275,6 @@ public:
   /// To sanitize a malformed utf8 string to a well-formed one.
   static std::string sanitizeUtf8(StringRef Text);
   static ValueDecl* findConformancesWithDocComment(ValueDecl *VD);
-  static bool printTypeInterface(Type Ty, DeclContext *DC, std::string &Result);
-  static bool printTypeInterface(Type Ty, DeclContext *DC, llvm::raw_ostream &Out);
 
 private:
   virtual void anchor();
@@ -276,8 +291,36 @@ public:
   void printText(StringRef Text) override;
 };
 
+/// AST stream printer that adds extra indentation to each line.
+class ExtraIndentStreamPrinter : public StreamPrinter {
+  StringRef ExtraIndent;
+
+public:
+  ExtraIndentStreamPrinter(raw_ostream &out, StringRef extraIndent)
+  : StreamPrinter(out), ExtraIndent(extraIndent) { }
+
+  virtual void printIndent() {
+    printText(ExtraIndent);
+    StreamPrinter::printIndent();
+  }
+};
+
 bool shouldPrint(const Decl *D, PrintOptions &Options);
 bool shouldPrintPattern(const Pattern *P, PrintOptions &Options);
+
+void printContext(raw_ostream &os, DeclContext *dc);
+
+bool printRequirementStub(ValueDecl *Requirement, DeclContext *Adopter,
+                          Type AdopterTy, SourceLoc TypeLoc, raw_ostream &OS);
+
+/// Print a keyword or punctuator directly by its kind.
+llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, tok keyword);
+
+/// Get the length of a keyword or punctuator by its kind.
+uint8_t getKeywordLen(tok keyword);
+
+/// Get <#code#>;
+StringRef getCodePlaceholder();
 
 } // namespace swift
 

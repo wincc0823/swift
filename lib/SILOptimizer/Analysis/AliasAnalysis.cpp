@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -55,7 +55,7 @@ enum class AAKind : unsigned {
 } // end anonymous namespace
 
 static llvm::cl::opt<AAKind>
-DebugAAKinds("aa", llvm::cl::desc("Alias Analysis Kinds:"),
+DebugAAKinds("aa-kind", llvm::cl::desc("Alias Analysis Kinds:"),
              llvm::cl::init(AAKind::All),
              llvm::cl::values(clEnumValN(AAKind::None,
                                          "none",
@@ -68,8 +68,7 @@ DebugAAKinds("aa", llvm::cl::desc("Alias Analysis Kinds:"),
                                          "typed-access-tb-aa"),
                               clEnumValN(AAKind::All,
                                          "all",
-                                         "all"),
-                              clEnumValEnd));
+                                         "all")));
 
 static inline bool shouldRunAA() {
   return unsigned(AAKind(DebugAAKinds));
@@ -98,6 +97,8 @@ llvm::raw_ostream &swift::operator<<(llvm::raw_ostream &OS, AliasResult R) {
   case AliasResult::PartialAlias: return OS << "PartialAlias";
   case AliasResult::MustAlias:    return OS << "MustAlias";
   }
+
+  llvm_unreachable("Unhandled AliasResult in switch.");
 }
 
 SILValue getAccessedMemory(SILInstruction *User) {
@@ -119,10 +120,7 @@ SILValue getAccessedMemory(SILInstruction *User) {
 /// Return true if the given SILArgument is an argument to the first BB of a
 /// function.
 static bool isFunctionArgument(SILValue V) {
-  auto *Arg = dyn_cast<SILArgument>(V);
-  if (!Arg)
-    return false;
-  return Arg->isFunctionArg();
+  return isa<SILFunctionArgument>(V);
 }
 
 /// Return true if V is an object that at compile time can be uniquely
@@ -305,6 +303,7 @@ AliasResult AliasAnalysis::aliasAddressProjection(SILValue V1, SILValue V2,
 static bool isTypedAccessOracle(SILInstruction *I) {
   switch (I->getKind()) {
   case ValueKind::RefElementAddrInst:
+  case ValueKind::RefTailAddrInst:
   case ValueKind::StructElementAddrInst:
   case ValueKind::TupleElementAddrInst:
   case ValueKind::UncheckedTakeEnumDataAddrInst:
@@ -329,21 +328,20 @@ static bool isTypedAccessOracle(SILInstruction *I) {
 /// given value is directly derived from a memory location, it cannot
 /// alias. Call arguments also cannot alias because they must follow \@in, @out,
 /// @inout, or \@in_guaranteed conventions.
-///
-/// FIXME: pointer_to_address should contain a flag that indicates whether the
-/// address is aliasing. Currently, we aggressively assume that
-/// pointer-to-address is never used for type punning, which is not yet
-/// clearly specified by our UnsafePointer API.
 static bool isAddressRootTBAASafe(SILValue V) {
-  if (auto *Arg = dyn_cast<SILArgument>(V))
-    return Arg->isFunctionArg();
+  if (isa<SILFunctionArgument>(V))
+    return true;
+
+  if (auto *PtrToAddr = dyn_cast<PointerToAddressInst>(V))
+    return PtrToAddr->isStrict();
 
   switch (V->getKind()) {
   default:
     return false;
   case ValueKind::AllocStackInst:
-  case ValueKind::AllocBoxInst:
-  case ValueKind::PointerToAddressInst:
+  case ValueKind::ProjectBoxInst:
+  case ValueKind::RefElementAddrInst:
+  case ValueKind::RefTailAddrInst:
     return true;
   }
 }
@@ -369,7 +367,7 @@ static SILType findTypedAccessType(SILValue V) {
 }
 
 SILType swift::computeTBAAType(SILValue V) {
-  if (isAddressRootTBAASafe(getUnderlyingObject(V)))
+  if (isAddressRootTBAASafe(getUnderlyingAddressRoot(V)))
     return findTypedAccessType(V);
 
   // FIXME: add ref_element_addr check here. TBAA says that objects cannot be
@@ -644,9 +642,9 @@ AliasResult AliasAnalysis::aliasInner(SILValue V1, SILValue V2,
 }
 
 bool AliasAnalysis::canApplyDecrementRefCount(FullApplySite FAS, SILValue Ptr) {
-  // Treat applications of @noreturn functions as decrementing ref counts. This
+  // Treat applications of no-return functions as decrementing ref counts. This
   // causes the apply to become a sink barrier for ref count increments.
-  if (FAS.getCallee()->getType().getAs<SILFunctionType>()->isNoReturn())
+  if (FAS.isCalleeNoReturn())
     return true;
 
   /// If the pointer cannot escape to the function we are done.
@@ -676,6 +674,13 @@ bool AliasAnalysis::canApplyDecrementRefCount(FullApplySite FAS, SILValue Ptr) {
 
 bool AliasAnalysis::canBuiltinDecrementRefCount(BuiltinInst *BI, SILValue Ptr) {
   for (SILValue Arg : BI->getArguments()) {
+
+    // Exclude some types of arguments where Ptr can never escape to.
+    if (isa<MetatypeInst>(Arg))
+      continue;
+    if (Arg->getType().is<BuiltinIntegerType>())
+      continue;
+
     // A builtin can only release an object if it can escape to one of the
     // builtin's arguments.
     if (EA->canEscapeToValue(Ptr, Arg))
@@ -743,7 +748,7 @@ bool swift::isLetPointer(SILValue V) {
 
 
   // Check if a parent of a tuple is a "let"
-  if (TupleElementAddrInst *TEA = dyn_cast<TupleElementAddrInst>(V))
+  if (auto *TEA = dyn_cast<TupleElementAddrInst>(V))
     return isLetPointer(TEA->getOperand());
 
   return false;

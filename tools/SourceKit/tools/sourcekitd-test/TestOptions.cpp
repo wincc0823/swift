@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -55,21 +55,21 @@ public:
   TestOptTable() : OptTable(InfoTable, llvm::array_lengthof(InfoTable)){}
 };
 
-} // namespace anonymous
+} // end anonymous namespace
 
 static std::pair<unsigned, unsigned> parseLineCol(StringRef LineCol) {
   unsigned Line, Col;
   size_t ColonIdx = LineCol.find(':');
   if (ColonIdx == StringRef::npos) {
-    llvm::errs() << "wrong pos format, it should be '<line>:<column'\n";
+    llvm::errs() << "wrong pos format, it should be '<line>:<column>'\n";
     exit(1);
   }
   if (LineCol.substr(0, ColonIdx).getAsInteger(10, Line)) {
-    llvm::errs() << "wrong pos format, it should be '<line>:<column'\n";
+    llvm::errs() << "wrong pos format, it should be '<line>:<column>'\n";
     exit(1);
   }
   if (LineCol.substr(ColonIdx+1).getAsInteger(10, Col)) {
-    llvm::errs() << "wrong pos format, it should be '<line>:<column'\n";
+    llvm::errs() << "wrong pos format, it should be '<line>:<column>'\n";
     exit(1);
   }
 
@@ -130,16 +130,26 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
         .Case("print-diags", SourceKitRequest::PrintDiags)
         .Case("extract-comment", SourceKitRequest::ExtractComment)
         .Case("module-groups", SourceKitRequest::ModuleGroups)
+        .Case("range", SourceKitRequest::RangeInfo)
+        .Case("translate", SourceKitRequest::NameTranslation)
+        .Case("markup-xml", SourceKitRequest::MarkupToXML)
         .Default(SourceKitRequest::None);
       if (Request == SourceKitRequest::None) {
         llvm::errs() << "error: invalid request, expected one of "
-            << "version/demangle/mangle/index/complete/cursor/related-idents/syntax-map/structure/"
-               "format/expand-placeholder/doc-info/sema/interface-gen/interface-gen-open/"
-               "find-usr/find-interface/open/edit/print-annotations/extract-comment/"
-               "module-groups\n";
+            << "version/demangle/mangle/index/complete/complete.open/complete.cursor/"
+               "complete.update/complete.cache.ondisk/complete.cache.setpopularapi/"
+               "cursor/related-idents/syntax-map/structure/format/expand-placeholder/"
+               "doc-info/sema/interface-gen/interface-gen-openfind-usr/find-interface/"
+               "open/edit/print-annotations/print-diags/extract-comment/module-groups/"
+               "range/translate/markup-xml\n";
         return true;
       }
       break;
+
+    case OPT_help: {
+      printHelp(false);
+      return true;
+    }
 
     case OPT_offset:
       if (StringRef(InputArg->getValue()).getAsInteger(10, Offset)) {
@@ -161,6 +171,23 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
       Col = linecol.second;
       break;
     }
+
+    case OPT_end_pos: {
+      auto linecol = parseLineCol(InputArg->getValue());
+      EndLine = linecol.first;
+      EndCol = linecol.second;
+      break;
+    }
+
+      case OPT_swift_version: {
+        unsigned ver;
+        if (StringRef(InputArg->getValue()).getAsInteger(10, ver)) {
+          llvm::errs() << "error: expected integer for 'swift-version'\n";
+          return true;
+        }
+        SwiftVersion = ver;
+        break;
+      }
 
     case OPT_line:
       if (StringRef(InputArg->getValue()).getAsInteger(10, Line)) {
@@ -215,6 +242,10 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
       CheckInterfaceIsASCII = true;
       break;
 
+    case OPT_dont_print_request:
+      PrintRequest = false;
+      break;
+
     case OPT_print_response_as_json:
       PrintResponseAsJSON = true;
       break;
@@ -241,12 +272,61 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
       SynthesizedExtensions = true;
       break;
 
+    case OPT_async:
+      isAsyncRequest = true;
+      break;
+
+    case OPT_cursor_action:
+      CollectActionables = true;
+      break;
+
+    case OPT_swift_name:
+      SwiftName = InputArg->getValue();
+      break;
+
+    case OPT_objc_name:
+      ObjCName = InputArg->getValue();
+      break;
+
+    case OPT_objc_selector:
+      ObjCSelector = InputArg->getValue();
+      break;
+
+    case OPT_cancel_on_subsequent_request:
+      unsigned Cancel;
+      if (StringRef(InputArg->getValue()).getAsInteger(10, Cancel)) {
+        llvm::errs() << "error: expected integer for 'cancel-on-subsequent-request'\n";
+        return true;
+      }
+      CancelOnSubsequentRequest = Cancel;
+      break;
+
     case OPT_UNKNOWN:
       llvm::errs() << "error: unknown argument: "
-                   << InputArg->getAsString(ParsedArgs) << '\n';
+                   << InputArg->getAsString(ParsedArgs) << '\n'
+                   << "Use -h or -help for assistance" << '\n';
       return true;
     }
   }
 
+  if (Request == SourceKitRequest::InterfaceGenOpen && isAsyncRequest) {
+    llvm::errs()
+        << "error: cannot use -async with interface-gen-open request\n";
+    return true;
+  }
+
   return false;
+}
+
+void TestOptions::printHelp(bool ShowHidden) const {
+
+  // Based off of swift/lib/Driver/Driver.cpp, at Driver::printHelp
+  //FIXME: should we use IncludedFlagsBitmask and ExcludedFlagsBitmask?
+  // Maybe not for modes such as Interactive, Batch, AutolinkExtract, etc,
+  // as in Driver.cpp. But could be useful for extra info, like HelpHidden.
+
+  TestOptTable Table;
+
+  Table.PrintHelp(llvm::outs(), "sourcekitd-test", "SourceKit Testing Tool",
+                      ShowHidden);
 }

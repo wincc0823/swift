@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -25,12 +25,16 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <string.h>
 #include "swift/Runtime/Config.h"
 #include "swift/ABI/MetadataValues.h"
 #include "swift/ABI/System.h"
 #include "swift/Basic/Malloc.h"
 #include "swift/Basic/FlaggedPointer.h"
 #include "swift/Basic/RelativePointer.h"
+#include "swift/Demangling/ManglingMacros.h"
+#include "swift/Runtime/Unreachable.h"
+#include "../../../stdlib/public/SwiftShims/HeapObject.h"
 
 namespace swift {
 
@@ -132,6 +136,7 @@ using TargetFarRelativeIndirectablePointer
   = typename Runtime::template FarRelativeIndirectablePointer<Pointee,Nullable>;
 
 struct HeapObject;
+class WeakReference;
   
 template <typename Runtime> struct TargetMetadata;
 using Metadata = TargetMetadata<InProcess>;
@@ -306,17 +311,6 @@ public:
 
 namespace value_witness_types {
 
-/// Given an initialized buffer, destroy its value and deallocate
-/// the buffer.  This can be decomposed as:
-///
-///   self->destroy(self->projectBuffer(buffer), self);
-///   self->deallocateBuffer(buffer), self);
-///
-/// Preconditions:
-///   'buffer' is an initialized buffer
-/// Postconditions:
-///   'buffer' is an unallocated buffer
-typedef void destroyBuffer(ValueBuffer *buffer, const Metadata *self);
 
 /// Given an unallocated buffer, initialize it as a copy of the
 /// object in the source buffer.  This can be decomposed as:
@@ -335,23 +329,6 @@ typedef OpaqueValue *initializeBufferWithCopyOfBuffer(ValueBuffer *dest,
                                                       ValueBuffer *src,
                                                       const Metadata *self);
 
-/// Given an allocated or initialized buffer, derive a pointer to
-/// the object.
-/// 
-/// Invariants:
-///   'buffer' is an allocated or initialized buffer
-typedef OpaqueValue *projectBuffer(ValueBuffer *buffer,
-                                   const Metadata *self);
-
-/// Given an allocated buffer, deallocate the object.
-///
-/// Preconditions:
-///   'buffer' is an allocated buffer
-/// Postconditions:
-///   'buffer' is an unallocated buffer
-typedef void deallocateBuffer(ValueBuffer *buffer,
-                              const Metadata *self);
-
 /// Given an initialized object, destroy it.
 ///
 /// Preconditions:
@@ -360,21 +337,6 @@ typedef void deallocateBuffer(ValueBuffer *buffer,
 ///   'object' is an uninitialized object
 typedef void destroy(OpaqueValue *object,
                      const Metadata *self);
-
-/// Given an uninitialized buffer and an initialized object, allocate
-/// storage in the buffer and copy the value there.
-///
-/// Returns the dest object.
-///
-/// Preconditions:
-///   'dest' is an uninitialized buffer
-/// Postconditions:
-///   'dest' is an initialized buffer
-/// Invariants:
-///   'src' is an initialized object
-typedef OpaqueValue *initializeBufferWithCopy(ValueBuffer *dest,
-                                              OpaqueValue *src,
-                                              const Metadata *self);
 
 /// Given an uninitialized object and an initialized object, copy
 /// the value.
@@ -406,24 +368,6 @@ typedef OpaqueValue *initializeWithCopy(OpaqueValue *dest,
 typedef OpaqueValue *assignWithCopy(OpaqueValue *dest,
                                     OpaqueValue *src,
                                     const Metadata *self);
-
-/// Given an uninitialized buffer and an initialized object, move
-/// the value from the object to the buffer, leaving the source object
-/// uninitialized.
-///
-/// This operation does not need to be safe against 'dest' and 'src' aliasing.
-/// 
-/// Returns the dest object.
-///
-/// Preconditions:
-///   'dest' is an uninitialized buffer
-///   'src' is an initialized object
-/// Postconditions:
-///   'dest' is an initialized buffer
-///   'src' is an uninitialized object
-typedef OpaqueValue *initializeBufferWithTake(ValueBuffer *dest,
-                                              OpaqueValue *src,
-                                              const Metadata *self);
 
 /// Given an uninitialized object and an initialized object, move
 /// the value from one to the other, leaving the source object
@@ -469,18 +413,6 @@ typedef OpaqueValue *assignWithTake(OpaqueValue *dest,
                                     OpaqueValue *src,
                                     const Metadata *self);
 
-/// Given an uninitialized buffer, allocate an object.
-///
-/// Returns the uninitialized object.
-///
-/// Preconditions:
-///   'buffer' is an uninitialized buffer
-/// Postconditions:
-///   'buffer' is an allocated buffer
-typedef OpaqueValue *allocateBuffer(ValueBuffer *buffer,
-                                    const Metadata *self);
-
-  
 /// Given an unallocated buffer and an initialized buffer, move the
 /// value from one buffer to the other, leaving the source buffer
 /// unallocated.
@@ -636,23 +568,17 @@ typedef void destructiveInjectEnumTag(OpaqueValue *src,
 /// A standard routine, suitable for placement in the value witness
 /// table, for copying an opaque POD object.
 SWIFT_RUNTIME_EXPORT
-extern "C" OpaqueValue *swift_copyPOD(OpaqueValue *dest,
-                                      OpaqueValue *src,
-                                      const Metadata *self);
+OpaqueValue *swift_copyPOD(OpaqueValue *dest,
+                           OpaqueValue *src,
+                           const Metadata *self);
 
 #define FOR_ALL_FUNCTION_VALUE_WITNESSES(MACRO) \
-  MACRO(destroyBuffer) \
   MACRO(initializeBufferWithCopyOfBuffer) \
-  MACRO(projectBuffer) \
-  MACRO(deallocateBuffer) \
   MACRO(destroy) \
-  MACRO(initializeBufferWithCopy) \
   MACRO(initializeWithCopy) \
   MACRO(assignWithCopy) \
-  MACRO(initializeBufferWithTake) \
   MACRO(initializeWithTake) \
   MACRO(assignWithTake) \
-  MACRO(allocateBuffer) \
   MACRO(initializeBufferWithTakeOfBuffer) \
   MACRO(destroyArray) \
   MACRO(initializeArrayWithCopy) \
@@ -764,6 +690,8 @@ struct ExtraInhabitantsValueWitnessTable : ValueWitnessTable {
   value_witness_types::storeExtraInhabitant *storeExtraInhabitant;
   value_witness_types::getExtraInhabitantIndex *getExtraInhabitantIndex;
 
+#define SET_WITNESS(NAME) base.NAME,
+
   constexpr ExtraInhabitantsValueWitnessTable()
     : ValueWitnessTable{}, extraInhabitantFlags(),
       storeExtraInhabitant(nullptr),
@@ -773,9 +701,15 @@ struct ExtraInhabitantsValueWitnessTable : ValueWitnessTable {
                             value_witness_types::extraInhabitantFlags eif,
                             value_witness_types::storeExtraInhabitant *sei,
                             value_witness_types::getExtraInhabitantIndex *geii)
-    : ValueWitnessTable(base), extraInhabitantFlags(eif),
+    : ValueWitnessTable{
+      FOR_ALL_FUNCTION_VALUE_WITNESSES(SET_WITNESS)
+      base.size,
+      base.flags,
+      base.stride
+    }, extraInhabitantFlags(eif),
       storeExtraInhabitant(sei),
       getExtraInhabitantIndex(geii) {}
+#undef SET_WITNESS
 
   static bool classof(const ValueWitnessTable *table) {
     return table->flags.hasExtraInhabitants();
@@ -883,65 +817,69 @@ inline unsigned TypeLayout::getNumExtraInhabitants() const {
 // The "Int" tables are used for arbitrary POD data with the matching
 // size/alignment characteristics.
 SWIFT_RUNTIME_EXPORT
-extern "C" const ValueWitnessTable _TWVBi8_;      // Builtin.Int8
+const ValueWitnessTable VALUE_WITNESS_SYM(Bi8_);   // Builtin.Int8
 SWIFT_RUNTIME_EXPORT
-extern "C" const ValueWitnessTable _TWVBi16_;     // Builtin.Int16
+const ValueWitnessTable VALUE_WITNESS_SYM(Bi16_);  // Builtin.Int16
 SWIFT_RUNTIME_EXPORT
-extern "C" const ValueWitnessTable _TWVBi32_;     // Builtin.Int32
+const ValueWitnessTable VALUE_WITNESS_SYM(Bi32_);  // Builtin.Int32
 SWIFT_RUNTIME_EXPORT
-extern "C" const ValueWitnessTable _TWVBi64_;     // Builtin.Int64
+const ValueWitnessTable VALUE_WITNESS_SYM(Bi64_);  // Builtin.Int64
 SWIFT_RUNTIME_EXPORT
-extern "C" const ValueWitnessTable _TWVBi128_;    // Builtin.Int128
+const ValueWitnessTable VALUE_WITNESS_SYM(Bi128_); // Builtin.Int128
 SWIFT_RUNTIME_EXPORT
-extern "C" const ValueWitnessTable _TWVBi256_;    // Builtin.Int256
+const ValueWitnessTable VALUE_WITNESS_SYM(Bi256_); // Builtin.Int256
+SWIFT_RUNTIME_EXPORT
+const ValueWitnessTable VALUE_WITNESS_SYM(Bi512_); // Builtin.Int512
 
 // The object-pointer table can be used for arbitrary Swift refcounted
 // pointer types.
 SWIFT_RUNTIME_EXPORT
-extern "C" const ExtraInhabitantsValueWitnessTable _TWVBo; // Builtin.NativeObject
+const ExtraInhabitantsValueWitnessTable VALUE_WITNESS_SYM(Bo); // Builtin.NativeObject
 SWIFT_RUNTIME_EXPORT
-extern "C" const ExtraInhabitantsValueWitnessTable _TWVXoBo; // unowned Builtin.NativeObject
+const ExtraInhabitantsValueWitnessTable UNOWNED_VALUE_WITNESS_SYM(Bo); // unowned Builtin.NativeObject
 SWIFT_RUNTIME_EXPORT
-extern "C" const ValueWitnessTable _TWVXwGSqBo_; // weak Builtin.NativeObject?
+const ValueWitnessTable WEAK_VALUE_WITNESS_SYM(Bo); // weak Builtin.NativeObject?
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const ExtraInhabitantsValueWitnessTable _TWVBb; // Builtin.BridgeObject
+const ExtraInhabitantsValueWitnessTable VALUE_WITNESS_SYM(Bb); // Builtin.BridgeObject
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const ExtraInhabitantsValueWitnessTable _TWVBp; // Builtin.RawPointer
+const ExtraInhabitantsValueWitnessTable VALUE_WITNESS_SYM(Bp); // Builtin.RawPointer
 
 #if SWIFT_OBJC_INTEROP
 // The ObjC-pointer table can be used for arbitrary ObjC pointer types.
 SWIFT_RUNTIME_EXPORT
-extern "C" const ExtraInhabitantsValueWitnessTable _TWVBO; // Builtin.UnknownObject
+const ExtraInhabitantsValueWitnessTable VALUE_WITNESS_SYM(BO); // Builtin.UnknownObject
 SWIFT_RUNTIME_EXPORT
-extern "C" const ExtraInhabitantsValueWitnessTable _TWVXoBO; // unowned Builtin.UnknownObject
+const ExtraInhabitantsValueWitnessTable UNOWNED_VALUE_WITNESS_SYM(BO); // unowned Builtin.UnknownObject
 SWIFT_RUNTIME_EXPORT
-extern "C" const ValueWitnessTable _TWVXwGSqBO_; // weak Builtin.UnknownObject?
+const ValueWitnessTable WEAK_VALUE_WITNESS_SYM(BO); // weak Builtin.UnknownObject?
 #endif
 
 // The () -> () table can be used for arbitrary function types.
 SWIFT_RUNTIME_EXPORT
-extern "C" const ExtraInhabitantsValueWitnessTable _TWVFT_T_;     // () -> ()
+const ExtraInhabitantsValueWitnessTable
+  VALUE_WITNESS_SYM(FUNCTION_MANGLING);     // () -> ()
 
 // The @convention(thin) () -> () table can be used for arbitrary thin function types.
 SWIFT_RUNTIME_EXPORT
-extern "C" const ExtraInhabitantsValueWitnessTable _TWVXfT_T_;     // @convention(thin) () -> ()
+const ExtraInhabitantsValueWitnessTable
+  VALUE_WITNESS_SYM(THIN_FUNCTION_MANGLING);    // @convention(thin) () -> ()
 
 // The () table can be used for arbitrary empty types.
 SWIFT_RUNTIME_EXPORT
-extern "C" const ValueWitnessTable _TWVT_;        // ()
+const ValueWitnessTable VALUE_WITNESS_SYM(EMPTY_TUPLE_MANGLING);        // ()
 
 // The table for aligned-pointer-to-pointer types.
 SWIFT_RUNTIME_EXPORT
-extern "C" const ExtraInhabitantsValueWitnessTable _TWVMBo; // Builtin.NativeObject.Type
+const ExtraInhabitantsValueWitnessTable METATYPE_VALUE_WITNESS_SYM(Bo); // Builtin.NativeObject.Type
 
 /// Return the value witnesses for unmanaged pointers.
 static inline const ValueWitnessTable &getUnmanagedPointerValueWitnesses() {
 #ifdef __LP64__
-  return _TWVBi64_;
+  return VALUE_WITNESS_SYM(Bi64_);
 #else
-  return _TWVBi32_;
+  return VALUE_WITNESS_SYM(Bi32_);
 #endif
 }
 
@@ -949,7 +887,7 @@ static inline const ValueWitnessTable &getUnmanagedPointerValueWitnesses() {
 static inline
 const ExtraInhabitantsValueWitnessTable &
 getUnmanagedPointerPointerValueWitnesses() {
-  return _TWVMBo;
+  return METATYPE_VALUE_WITNESS_SYM(Bo);
 }
 
 /// The header before a metadata object which appears on all type
@@ -1045,6 +983,17 @@ static const uintptr_t ObjCReservedBitsMask =
 static const unsigned ObjCReservedLowBits =
   SWIFT_ABI_DEFAULT_OBJC_NUM_RESERVED_LOW_BITS;
 
+#elif defined(__s390x__)
+
+static const uintptr_t LeastValidPointerValue =
+  SWIFT_ABI_DEFAULT_LEAST_VALID_POINTER;
+static const uintptr_t SwiftSpareBitsMask =
+  SWIFT_ABI_S390X_SWIFT_SPARE_BITS_MASK;
+static const uintptr_t ObjCReservedBitsMask =
+  SWIFT_ABI_DEFAULT_OBJC_RESERVED_BITS_MASK;
+static const unsigned ObjCReservedLowBits =
+  SWIFT_ABI_DEFAULT_OBJC_NUM_RESERVED_LOW_BITS;
+
 #else
 
 static const uintptr_t LeastValidPointerValue =
@@ -1076,6 +1025,13 @@ template <typename Runtime> struct TargetOpaqueMetadata;
 // FIXME: https://bugs.swift.org/browse/SR-1155
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Winvalid-offsetof"
+
+extern uint64_t RelativeDirectPointerNullPtr;
+
+#define RelativeDirectPointerNullPtrRef                                        \
+  *reinterpret_cast<ConstTargetFarRelativeDirectPointer<                       \
+      Runtime, TargetNominalTypeDescriptor, /*nullable*/ true> *>(             \
+      &RelativeDirectPointerNullPtr)
 
 /// The common structure of all type metadata.
 template <typename Runtime>
@@ -1134,7 +1090,8 @@ public:
     case MetadataKind::ErrorObject:
       return false;
     }
-    assert(false && "not a metadata kind");
+    
+    swift_runtime_unreachable("Unhandled MetadataKind in switch.");
   }
   
   /// Is this metadata for an existential type?
@@ -1159,7 +1116,8 @@ public:
     case MetadataKind::ErrorObject:
       return false;
     }
-    assert(false && "not a metadata kind");
+
+    swift_runtime_unreachable("Unhandled MetadataKind in switch.");
   }
   
   /// Is this either type metadata or a class object for any kind of class?
@@ -1206,19 +1164,34 @@ public:
   void vw_destructiveInjectEnumTag(OpaqueValue *value, unsigned tag) const {
     getValueWitnesses()->_asEVWT()->destructiveInjectEnumTag(value, tag, this);
   }
-  
+
+  /// Allocate an out-of-line buffer if values of this type don't fit in the
+  /// ValueBuffer.
+  /// NOTE: This is not a box for copy-on-write existentials.
+  OpaqueValue *allocateBufferIn(ValueBuffer *buffer) const;
+
+  /// Deallocate an out-of-line buffer stored in 'buffer' if values of this type
+  /// are not stored inline in the ValueBuffer.
+  void deallocateBufferIn(ValueBuffer *buffer) const;
+
+  // Allocate an out-of-line buffer box (reference counted) if values of this
+  // type don't fit in the ValueBuffer.
+  // NOTE: This *is* a box for copy-on-write existentials.
+  OpaqueValue *allocateBoxForExistentialIn(ValueBuffer *Buffer) const;
+
   /// Get the nominal type descriptor if this metadata describes a nominal type,
   /// or return null if it does not.
-  ConstTargetFarRelativeDirectPointer<Runtime, TargetNominalTypeDescriptor,
-                                      /*nullable*/ true>
+  const ConstTargetFarRelativeDirectPointer<Runtime,
+                                            TargetNominalTypeDescriptor,
+                                            /*nullable*/ true> &
   getNominalTypeDescriptor() const {
     switch (getKind()) {
     case MetadataKind::Class: {
       const auto cls = static_cast<const TargetClassMetadata<Runtime> *>(this);
       if (!cls->isTypeMetadata())
-        return 0;
+        return RelativeDirectPointerNullPtrRef;
       if (cls->isArtificialSubclass())
-        return 0;
+        return RelativeDirectPointerNullPtrRef;
       return cls->getDescription();
     }
     case MetadataKind::Struct:
@@ -1236,8 +1209,10 @@ public:
     case MetadataKind::HeapLocalVariable:
     case MetadataKind::HeapGenericLocalVariable:
     case MetadataKind::ErrorObject:
-      return 0;
+      return RelativeDirectPointerNullPtrRef;
     }
+
+    swift_runtime_unreachable("Unhandled MetadataKind in switch.");
   }
   
   /// Get the generic metadata pattern from which this generic type instance was
@@ -1273,35 +1248,37 @@ using OpaqueMetadata = TargetOpaqueMetadata<InProcess>;
 // matching characteristics.
 using FullOpaqueMetadata = FullMetadata<OpaqueMetadata>;
 SWIFT_RUNTIME_EXPORT
-extern "C" const FullOpaqueMetadata _TMBi8_;      // Builtin.Int8
+const FullOpaqueMetadata METADATA_SYM(Bi8_);      // Builtin.Int8
 SWIFT_RUNTIME_EXPORT
-extern "C" const FullOpaqueMetadata _TMBi16_;     // Builtin.Int16
+const FullOpaqueMetadata METADATA_SYM(Bi16_);     // Builtin.Int16
 SWIFT_RUNTIME_EXPORT
-extern "C" const FullOpaqueMetadata _TMBi32_;     // Builtin.Int32
+const FullOpaqueMetadata METADATA_SYM(Bi32_);     // Builtin.Int32
 SWIFT_RUNTIME_EXPORT
-extern "C" const FullOpaqueMetadata _TMBi64_;     // Builtin.Int64
+const FullOpaqueMetadata METADATA_SYM(Bi64_);     // Builtin.Int64
 SWIFT_RUNTIME_EXPORT
-extern "C" const FullOpaqueMetadata _TMBi128_;    // Builtin.Int128
+const FullOpaqueMetadata METADATA_SYM(Bi128_);    // Builtin.Int128
 SWIFT_RUNTIME_EXPORT
-extern "C" const FullOpaqueMetadata _TMBi256_;    // Builtin.Int256
+const FullOpaqueMetadata METADATA_SYM(Bi256_);    // Builtin.Int256
 SWIFT_RUNTIME_EXPORT
-extern "C" const FullOpaqueMetadata _TMBo;        // Builtin.NativeObject
+const FullOpaqueMetadata METADATA_SYM(Bi512_);    // Builtin.Int512
 SWIFT_RUNTIME_EXPORT
-extern "C" const FullOpaqueMetadata _TMBb;        // Builtin.BridgeObject
+const FullOpaqueMetadata METADATA_SYM(Bo);        // Builtin.NativeObject
 SWIFT_RUNTIME_EXPORT
-extern "C" const FullOpaqueMetadata _TMBp;        // Builtin.RawPointer
+const FullOpaqueMetadata METADATA_SYM(Bb);        // Builtin.BridgeObject
 SWIFT_RUNTIME_EXPORT
-extern "C" const FullOpaqueMetadata _TMBB;        // Builtin.UnsafeValueBuffer
+const FullOpaqueMetadata METADATA_SYM(Bp);        // Builtin.RawPointer
+SWIFT_RUNTIME_EXPORT
+const FullOpaqueMetadata METADATA_SYM(BB);        // Builtin.UnsafeValueBuffer
 #if SWIFT_OBJC_INTEROP
 SWIFT_RUNTIME_EXPORT
-extern "C" const FullOpaqueMetadata _TMBO;        // Builtin.UnknownObject
+const FullOpaqueMetadata METADATA_SYM(BO);        // Builtin.UnknownObject
 #endif
 
 /// The prefix on a heap metadata.
 struct HeapMetadataHeaderPrefix {
   /// Destroy the object, returning the allocated size of the object
   /// or 0 if the object shouldn't be deallocated.
-  void (*destroy)(HeapObject *);
+  SWIFT_CC(swift) void (*destroy)(SWIFT_CONTEXT HeapObject *);
 };
 
 /// The header present on all heap metadata.
@@ -1518,7 +1495,7 @@ struct TargetNominalTypeDescriptor {
 };
 using NominalTypeDescriptor = TargetNominalTypeDescriptor<InProcess>;
 
-typedef void (*ClassIVarDestroyer)(HeapObject *);
+typedef SWIFT_CC(swift) void (*ClassIVarDestroyer)(SWIFT_CONTEXT HeapObject *);
 
 /// The structure of all class metadata.  This structure is embedded
 /// directly within the class's heap metadata structure and therefore
@@ -1546,6 +1523,22 @@ struct TargetClassMetadata : public TargetHeapMetadata<Runtime> {
       InstanceSize(size), InstanceAlignMask(alignMask),
       Reserved(0), ClassSize(classSize), ClassAddressPoint(classAddressPoint),
       Description(nullptr), IVarDestroyer(ivarDestroyer) {}
+
+  // Description's copy ctor is deleted so we have to do this the hard way.
+  TargetClassMetadata(const TargetClassMetadata& other)
+    : TargetHeapMetadata<Runtime>(other),
+      SuperClass(other.SuperClass),
+      CacheData{other.CacheData[0], other.CacheData[1]},
+      Data(other.Data),
+      Flags(other.Flags),
+      InstanceAddressPoint(other.InstanceAddressPoint),
+      InstanceSize(other.InstanceSize),
+      InstanceAlignMask(other.InstanceAlignMask),
+      Reserved(other.Reserved),
+      ClassSize(other.ClassSize),
+      ClassAddressPoint(other.ClassAddressPoint),
+      Description(other.Description.get()),
+      IVarDestroyer(other.IVarDestroyer) {}
 
   /// The metadata for the superclass.  This is null for the root class.
   ConstTargetMetadataPointer<Runtime, swift::TargetClassMetadata> SuperClass;
@@ -1622,8 +1615,10 @@ private:
   //   - "tabulated" virtual methods
 
 public:
-  ConstTargetFarRelativeDirectPointer<Runtime, TargetNominalTypeDescriptor,
-  /*nullable*/ true> getDescription() const {
+  const ConstTargetFarRelativeDirectPointer<Runtime,
+                                            TargetNominalTypeDescriptor,
+                                            /*nullable*/ true> &
+  getDescription() const {
     assert(isTypeMetadata());
     assert(!isArtificialSubclass());
     return Description;
@@ -1766,6 +1761,9 @@ struct TargetHeapLocalVariableMetadata
   static bool classof(const TargetMetadata<Runtime> *metadata) {
     return metadata->getKind() == MetadataKind::HeapLocalVariable;
   }
+  constexpr TargetHeapLocalVariableMetadata()
+      : TargetHeapMetadata<Runtime>(MetadataKind::HeapLocalVariable),
+        OffsetToFirstCapture(0), CaptureDescription(nullptr) {}
 };
 using HeapLocalVariableMetadata
   = TargetHeapLocalVariableMetadata<InProcess>;
@@ -1784,17 +1782,6 @@ struct TargetObjCClassWrapperMetadata : public TargetMetadata<Runtime> {
 using ObjCClassWrapperMetadata
   = TargetObjCClassWrapperMetadata<InProcess>;
 
-// FIXME: Workaround for rdar://problem/18889711. 'Consume' does not require
-// a barrier on ARM64, but LLVM doesn't know that. Although 'relaxed'
-// is formally UB by C++11 language rules, we should be OK because neither
-// the processor model nor the optimizer can realistically reorder our uses
-// of 'consume'.
-#if __arm64__
-#  define SWIFT_MEMORY_ORDER_CONSUME (std::memory_order_relaxed)
-#else
-#  define SWIFT_MEMORY_ORDER_CONSUME (std::memory_order_consume)
-#endif
-
 /// The structure of metadata for foreign types where the source
 /// language doesn't provide any sort of more interesting metadata for
 /// us to use.
@@ -1804,6 +1791,8 @@ struct TargetForeignTypeMetadata : public TargetMetadata<Runtime> {
   using StoredSize = typename Runtime::StoredSize;
   using InitializationFunction_t =
     void (*)(TargetForeignTypeMetadata<Runtime> *selectedMetadata);
+  using RuntimeMetadataPointer =
+      ConstTargetMetadataPointer<Runtime, swift::TargetForeignTypeMetadata>;
 
   /// Foreign type metadata may have extra header fields depending on
   /// the flags.
@@ -1818,14 +1807,12 @@ struct TargetForeignTypeMetadata : public TargetMetadata<Runtime> {
     /// The Swift-mangled name of the type. This is the uniquing key for the
     /// type.
     TargetPointer<Runtime, const char> Name;
-    
+
     /// A pointer to the actual, runtime-uniqued metadata for this
     /// type.  This is essentially an invasive cache for the lookup
     /// structure.
-    mutable std::atomic<
-      ConstTargetMetadataPointer<Runtime, swift::TargetForeignTypeMetadata>
-    > Unique;
-    
+    mutable std::atomic<RuntimeMetadataPointer> Unique;
+
     /// Various flags.
     enum : StoredSize {
       /// This metadata has an initialization callback function.  If
@@ -1844,9 +1831,8 @@ struct TargetForeignTypeMetadata : public TargetMetadata<Runtime> {
     return reinterpret_cast<TargetPointer<Runtime, const char>>(
       asFullMetadata(this)->Name);
   }
-  
-  ConstTargetMetadataPointer<Runtime, swift::TargetForeignTypeMetadata>
-  getCachedUniqueMetadata() const {
+
+  RuntimeMetadataPointer getCachedUniqueMetadata() const {
 #if __alpha__
     // TODO: This can be a relaxed-order load if there is no initialization
     // function. On platforms we care about, consume is no more expensive than
@@ -1857,15 +1843,13 @@ struct TargetForeignTypeMetadata : public TargetMetadata<Runtime> {
 #endif
     return asFullMetadata(this)->Unique.load(SWIFT_MEMORY_ORDER_CONSUME);
   }
-  
-  void
-  setCachedUniqueMetadata(
-    ConstTargetMetadataPointer<Runtime, swift::TargetForeignTypeMetadata> unique)
-  const {
-    assert((asFullMetadata(this)->Unique == nullptr
-            || asFullMetadata(this)->Unique == unique)
-           && "already set unique metadata");
-    
+
+  void setCachedUniqueMetadata(RuntimeMetadataPointer unique) const {
+    assert((static_cast<RuntimeMetadataPointer>(asFullMetadata(this)->Unique) ==
+                nullptr ||
+            asFullMetadata(this)->Unique == unique) &&
+           "already set unique metadata");
+
     // If there is no initialization function, this can be a relaxed store.
     if (!hasInitializationFunction())
       asFullMetadata(this)->Unique.store(unique, std::memory_order_relaxed);
@@ -1923,7 +1907,7 @@ struct TargetValueMetadata : public TargetMetadata<Runtime> {
   TargetValueMetadata(MetadataKind Kind,
     ConstTargetMetadataPointer<Runtime, TargetNominalTypeDescriptor>
                       description,
-    ConstTargetMetadataPointer<Runtime, TargetMetadata> parent)
+    ConstTargetMetadataPointer<Runtime, swift::TargetMetadata> parent)
     : TargetMetadata<Runtime>(Kind),
       Description(description),
       Parent(parent)
@@ -1945,14 +1929,18 @@ struct TargetValueMetadata : public TargetMetadata<Runtime> {
   }
   
   /// Retrieve the generic arguments of this type.
-  ConstTargetMetadataPointer<Runtime, TargetMetadata> const *
+  ConstTargetMetadataPointer<Runtime, swift::TargetMetadata> const *
   getGenericArgs() const {
     if (!Description->GenericParams.hasGenericRequirements())
       return nullptr;
 
     auto asWords = reinterpret_cast<
-      ConstTargetMetadataPointer<Runtime, TargetMetadata> const *>(this);
+      ConstTargetMetadataPointer<Runtime, swift::TargetMetadata> const *>(this);
     return (asWords + Description->GenericParams.Offset);
+  }
+
+  const TargetNominalTypeDescriptor<Runtime> *getDescription() const {
+    return Description.get();
   }
 
   StoredPointer offsetToDescriptorOffset() const {
@@ -2045,7 +2033,7 @@ struct TargetFunctionTypeMetadata : public TargetMetadata<Runtime> {
   TargetFunctionTypeFlags<StoredSize> Flags;
 
   /// The type metadata for the result type.
-  ConstTargetMetadataPointer<Runtime, TargetMetadata> ResultType;
+  ConstTargetMetadataPointer<Runtime, swift::TargetMetadata> ResultType;
 
   TargetPointer<Runtime, Argument> getArguments() {
     return reinterpret_cast<TargetPointer<Runtime, Argument>>(this + 1);
@@ -2075,7 +2063,7 @@ using FunctionTypeMetadata = TargetFunctionTypeMetadata<InProcess>;
 template <typename Runtime>
 struct TargetMetatypeMetadata : public TargetMetadata<Runtime> {
   /// The type metadata for the element.
-  ConstTargetMetadataPointer<Runtime, TargetMetadata> InstanceType;
+  ConstTargetMetadataPointer<Runtime, swift::TargetMetadata> InstanceType;
 
   static bool classof(const TargetMetadata<Runtime> *metadata) {
     return metadata->getKind() == MetadataKind::Metatype;
@@ -2103,7 +2091,7 @@ struct TargetTupleTypeMetadata : public TargetMetadata<Runtime> {
 
   struct Element {
     /// The type of the element.
-    ConstTargetMetadataPointer<Runtime, TargetMetadata> Type;
+    ConstTargetMetadataPointer<Runtime, swift::TargetMetadata> Type;
 
     /// The offset of the tuple element within the tuple.
     StoredSize Offset;
@@ -2139,7 +2127,8 @@ using TupleTypeMetadata = TargetTupleTypeMetadata<InProcess>;
   
 /// The standard metadata for the empty tuple type.
 SWIFT_RUNTIME_EXPORT
-extern "C" const FullMetadata<TupleTypeMetadata> _TMT_;
+const
+  FullMetadata<TupleTypeMetadata> METADATA_SYM(EMPTY_TUPLE_MANGLING);
 
 template <typename Runtime> struct TargetProtocolDescriptor;
   
@@ -2298,8 +2287,9 @@ using OpaqueExistentialContainer
   = TargetOpaqueExistentialContainer<InProcess>;
 
 /// The basic layout of a class-bounded existential type.
-struct ClassExistentialContainer {
-  void *Value;
+template <typename ContainedValue>
+struct ClassExistentialContainerImpl {
+  ContainedValue Value;
 
   const WitnessTable **getWitnessTables() {
     return reinterpret_cast<const WitnessTable**>(this + 1);
@@ -2308,11 +2298,15 @@ struct ClassExistentialContainer {
     return reinterpret_cast<const WitnessTable* const *>(this + 1);
   }
 
-  void copyTypeInto(ClassExistentialContainer *dest, unsigned numTables) const {
+  void copyTypeInto(ClassExistentialContainerImpl *dest,
+                    unsigned numTables) const {
     for (unsigned i = 0; i != numTables; ++i)
       dest->getWitnessTables()[i] = getWitnessTables()[i];
   }
 };
+using ClassExistentialContainer = ClassExistentialContainerImpl<void *>;
+using WeakClassExistentialContainer =
+  ClassExistentialContainerImpl<WeakReference>;
 
 /// The possible physical representations of existential types.
 enum class ExistentialTypeRepresentation {
@@ -2320,8 +2314,8 @@ enum class ExistentialTypeRepresentation {
   Opaque,
   /// The type uses a class existential representation.
   Class,
-  /// The type uses the ErrorProtocol boxed existential representation.
-  ErrorProtocol,
+  /// The type uses the Error boxed existential representation.
+  Error,
 };
 
 /// The structure of existential type metadata.
@@ -2375,12 +2369,24 @@ struct TargetExistentialTypeMetadata : public TargetMetadata<Runtime> {
     return Flags.getClassConstraint() == ProtocolClassConstraint::Class;
   }
 
+  const TargetMetadata<Runtime> *getSuperclassConstraint() const {
+    if (!Flags.hasSuperclassConstraint())
+      return nullptr;
+
+    // Get a pointer to tail-allocated storage for this metadata record.
+    auto Pointer = reinterpret_cast<
+      ConstTargetMetadataPointer<Runtime, TargetMetadata> const *>(this + 1);
+
+    // The superclass immediately follows the list of protocol descriptors.
+    return Pointer[Protocols.NumProtocols];
+  }
+
   static bool classof(const TargetMetadata<Runtime> *metadata) {
     return metadata->getKind() == MetadataKind::Existential;
   }
 
   static constexpr StoredPointer
-  OffsetToNumProtocols = sizeof(TargetMetadata<Runtime>) + sizeof(Flags);
+  OffsetToNumProtocols = sizeof(TargetMetadata<Runtime>) + sizeof(ExistentialTypeFlags);
 
 };
 using ExistentialTypeMetadata
@@ -2412,7 +2418,7 @@ template <typename Runtime>
 struct TargetExistentialMetatypeMetadata
   : public TargetMetadata<Runtime> {
   /// The type metadata for the element.
-  ConstTargetMetadataPointer<Runtime, TargetMetadata> InstanceType;
+  ConstTargetMetadataPointer<Runtime, swift::TargetMetadata> InstanceType;
 
   /// The number of witness tables and class-constrained-ness of the
   /// underlying type.
@@ -2493,6 +2499,63 @@ struct TargetGenericMetadata {
   }
 };
 using GenericMetadata = TargetGenericMetadata<InProcess>;
+
+/// Heap metadata for a box, which may have been generated statically by the
+/// compiler or by the runtime.
+template <typename Runtime>
+struct TargetBoxHeapMetadata : public TargetHeapMetadata<Runtime> {
+  /// The offset from the beginning of a box to its value.
+  unsigned Offset;
+
+  constexpr TargetBoxHeapMetadata(MetadataKind kind, unsigned offset)
+  : TargetHeapMetadata<Runtime>(kind), Offset(offset) {}
+};
+using BoxHeapMetadata = TargetBoxHeapMetadata<InProcess>;
+
+/// Heap metadata for runtime-instantiated generic boxes.
+template <typename Runtime>
+struct TargetGenericBoxHeapMetadata : public TargetBoxHeapMetadata<Runtime> {
+  using super = TargetBoxHeapMetadata<Runtime>;
+  using super::Offset;
+
+  /// The type inside the box.
+  ConstTargetMetadataPointer<Runtime, swift::TargetMetadata> BoxedType;
+
+  constexpr
+  TargetGenericBoxHeapMetadata(MetadataKind kind, unsigned offset,
+    ConstTargetMetadataPointer<Runtime, swift::TargetMetadata> boxedType)
+  : TargetBoxHeapMetadata<Runtime>(kind, offset), BoxedType(boxedType)
+  {}
+
+  static unsigned getHeaderOffset(const Metadata *boxedType) {
+    // Round up the header size to alignment.
+    unsigned alignMask = boxedType->getValueWitnesses()->getAlignmentMask();
+    return (sizeof(HeapObject) + alignMask) & ~alignMask;
+  }
+
+  /// Project the value out of a box of this type.
+  OpaqueValue *project(HeapObject *box) const {
+    auto bytes = reinterpret_cast<char*>(box);
+    return reinterpret_cast<OpaqueValue *>(bytes + Offset);
+  }
+
+  /// Get the allocation size of this box.
+  unsigned getAllocSize() const {
+    return Offset + BoxedType->getValueWitnesses()->getSize();
+  }
+
+  /// Get the allocation alignment of this box.
+  unsigned getAllocAlignMask() const {
+    // Heap allocations are at least pointer aligned.
+    return BoxedType->getValueWitnesses()->getAlignmentMask()
+      | (alignof(void*) - 1);
+  }
+
+  static bool classof(const TargetMetadata<Runtime> *metadata) {
+    return metadata->getKind() == MetadataKind::HeapGenericLocalVariable;
+  }
+};
+using GenericBoxHeapMetadata = TargetGenericBoxHeapMetadata<InProcess>;
 
 /// \brief The control structure of a generic or resilient protocol
 /// conformance.
@@ -2802,21 +2865,21 @@ using ProtocolConformanceRecord
 ///     return metadata
 ///   }
 SWIFT_RT_ENTRY_VISIBILITY
-extern "C" const Metadata *
+const Metadata *
 swift_getGenericMetadata(GenericMetadata *pattern,
                          const void *arguments)
     SWIFT_CC(RegisterPreservingCC);
 
 // Callback to allocate a generic class metadata object.
 SWIFT_RUNTIME_EXPORT
-extern "C" ClassMetadata *
+ClassMetadata *
 swift_allocateGenericClassMetadata(GenericMetadata *pattern,
                                    const void *arguments,
                                    ClassMetadata *superclass);
 
 // Callback to allocate a generic struct/enum metadata object.
 SWIFT_RUNTIME_EXPORT
-extern "C" ValueMetadata *
+ValueMetadata *
 swift_allocateGenericValueMetadata(GenericMetadata *pattern,
                                    const void *arguments);
 
@@ -2840,7 +2903,7 @@ swift_allocateGenericValueMetadata(GenericMetadata *pattern,
 ///   is ultimately a statement about the user model of overlapping
 ///   conformances.
 SWIFT_RT_ENTRY_VISIBILITY
-extern "C" const WitnessTable *
+const WitnessTable *
 swift_getGenericWitnessTable(GenericWitnessTable *genericTable,
                              const Metadata *type,
                              void * const *instantiationArgs)
@@ -2848,24 +2911,24 @@ swift_getGenericWitnessTable(GenericWitnessTable *genericTable,
 
 /// \brief Fetch a uniqued metadata for a function type.
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getFunctionTypeMetadata(const void *flagsArgsAndResult[]);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getFunctionTypeMetadata1(FunctionTypeFlags flags,
                                const void *arg0,
                                const Metadata *resultMetadata);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getFunctionTypeMetadata2(FunctionTypeFlags flags,
                                const void *arg0,
                                const void *arg1,
                                const Metadata *resultMetadata);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getFunctionTypeMetadata3(FunctionTypeFlags flags,
                                const void *arg0,
                                const void *arg1,
@@ -2874,27 +2937,27 @@ swift_getFunctionTypeMetadata3(FunctionTypeFlags flags,
 
 /// \brief Fetch a uniqued metadata for a thin function type.
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getThinFunctionTypeMetadata(size_t numArguments,
                                   const void * argsAndResult []);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getThinFunctionTypeMetadata0(const Metadata *resultMetadata);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getThinFunctionTypeMetadata1(const void *arg0,
                                    const Metadata *resultMetadata);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getThinFunctionTypeMetadata2(const void *arg0,
                                    const void *arg1,
                                    const Metadata *resultMetadata);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getThinFunctionTypeMetadata3(const void *arg0,
                                    const void *arg1,
                                    const void *arg2,
@@ -2902,27 +2965,27 @@ swift_getThinFunctionTypeMetadata3(const void *arg0,
 
 /// \brief Fetch a uniqued metadata for a C function type.
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getCFunctionTypeMetadata(size_t numArguments,
                                const void * argsAndResult []);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getCFunctionTypeMetadata0(const Metadata *resultMetadata);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getCFunctionTypeMetadata1(const void *arg0,
                                 const Metadata *resultMetadata);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getCFunctionTypeMetadata2(const void *arg0,
                                 const void *arg1,
                                 const Metadata *resultMetadata);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getCFunctionTypeMetadata3(const void *arg0,
                                 const void *arg1,
                                 const void *arg2,
@@ -2931,45 +2994,45 @@ swift_getCFunctionTypeMetadata3(const void *arg0,
 #if SWIFT_OBJC_INTEROP
 /// \brief Fetch a uniqued metadata for a block type.
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getBlockTypeMetadata(size_t numArguments,
                            const void *argsAndResult []);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getBlockTypeMetadata0(const Metadata *resultMetadata);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getBlockTypeMetadata1(const void *arg0,
                             const Metadata *resultMetadata);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getBlockTypeMetadata2(const void *arg0,
                             const void *arg1,
                             const Metadata *resultMetadata);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const FunctionTypeMetadata *
+const FunctionTypeMetadata *
 swift_getBlockTypeMetadata3(const void *arg0,
                             const void *arg1,
                             const void *arg2,
                             const Metadata *resultMetadata);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" void
+void
 swift_instantiateObjCClass(const ClassMetadata *theClass);
 #endif
 
 /// \brief Fetch a uniqued type metadata for an ObjC class.
 SWIFT_RUNTIME_EXPORT
-extern "C" const Metadata *
+const Metadata *
 swift_getObjCClassMetadata(const ClassMetadata *theClass);
 
 /// \brief Fetch a unique type metadata object for a foreign type.
 SWIFT_RUNTIME_EXPORT
-extern "C" const ForeignTypeMetadata *
+const ForeignTypeMetadata *
 swift_getForeignTypeMetadata(ForeignTypeMetadata *nonUnique);
 
 /// \brief Fetch a uniqued metadata for a tuple type.
@@ -2996,19 +3059,19 @@ swift_getForeignTypeMetadata(ForeignTypeMetadata *nonUnique);
 ///   This is useful when working with a non-dependent tuple type
 ///   where the entrypoint is just being used to unique the metadata.
 SWIFT_RUNTIME_EXPORT
-extern "C" const TupleTypeMetadata *
+const TupleTypeMetadata *
 swift_getTupleTypeMetadata(size_t numElements,
                            const Metadata * const *elements,
                            const char *labels,
                            const ValueWitnessTable *proposedWitnesses);
 
 SWIFT_RUNTIME_EXPORT
-extern "C" const TupleTypeMetadata *
+const TupleTypeMetadata *
 swift_getTupleTypeMetadata2(const Metadata *elt0, const Metadata *elt1,
                             const char *labels,
                             const ValueWitnessTable *proposedWitnesses);
 SWIFT_RUNTIME_EXPORT
-extern "C" const TupleTypeMetadata *
+const TupleTypeMetadata *
 swift_getTupleTypeMetadata3(const Metadata *elt0, const Metadata *elt1,
                             const Metadata *elt2, const char *labels,
                             const ValueWitnessTable *proposedWitnesses);
@@ -3016,7 +3079,7 @@ swift_getTupleTypeMetadata3(const Metadata *elt0, const Metadata *elt1,
 /// Initialize the value witness table and struct field offset vector for a
 /// struct, using the "Universal" layout strategy.
 SWIFT_RUNTIME_EXPORT
-extern "C" void swift_initStructMetadata_UniversalStrategy(size_t numFields,
+void swift_initStructMetadata_UniversalStrategy(size_t numFields,
                                          const TypeLayout * const *fieldTypes,
                                          size_t *fieldOffsets,
                                          ValueWitnessTable *vwtable);
@@ -3033,7 +3096,7 @@ struct ClassFieldLayout {
 /// for its superclass.  Note that swift_allocateGenericClassMetadata will
 /// never produce a metadata that requires relocation.
 SWIFT_RUNTIME_EXPORT
-extern "C" ClassMetadata *
+ClassMetadata *
 swift_initClassMetadata_UniversalStrategy(ClassMetadata *self,
                                           size_t numFields,
                                           const ClassFieldLayout *fieldLayouts,
@@ -3041,206 +3104,29 @@ swift_initClassMetadata_UniversalStrategy(ClassMetadata *self,
 
 /// \brief Fetch a uniqued metadata for a metatype type.
 SWIFT_RUNTIME_EXPORT
-extern "C" const MetatypeMetadata *
+const MetatypeMetadata *
 swift_getMetatypeMetadata(const Metadata *instanceType);
 
 /// \brief Fetch a uniqued metadata for an existential metatype type.
 SWIFT_RUNTIME_EXPORT
-extern "C" const ExistentialMetatypeMetadata *
+const ExistentialMetatypeMetadata *
 swift_getExistentialMetatypeMetadata(const Metadata *instanceType);
 
 /// \brief Fetch a uniqued metadata for an existential type. The array
 /// referenced by \c protocols will be sorted in-place.
 SWIFT_RT_ENTRY_VISIBILITY
-extern "C" const ExistentialTypeMetadata *
-swift_getExistentialTypeMetadata(size_t numProtocols,
+const ExistentialTypeMetadata *
+swift_getExistentialTypeMetadata(ProtocolClassConstraint classConstraint,
+                                 const Metadata *superclassConstraint,
+                                 size_t numProtocols,
                                  const ProtocolDescriptor **protocols)
     SWIFT_CC(RegisterPreservingCC);
-
-/// \brief Perform a checked dynamic cast of a value to a target type.
-///
-/// \param dest A buffer into which to write the destination value.
-/// In all cases, this will be left uninitialized if the cast fails.
-///
-/// \param src Pointer to the source value to cast.  This may be left
-///   uninitialized after the operation, depending on the flags.
-///
-/// \param targetType The type to which we are casting.
-///
-/// \param srcType The static type of the source value.
-///
-/// \param flags Flags to control the operation.
-///
-/// \return true if the cast succeeded. Depending on the flags,
-///   swift_dynamicCast may fail rather than return false.
-SWIFT_RT_ENTRY_VISIBILITY
-extern "C" bool
-swift_dynamicCast(OpaqueValue *dest, OpaqueValue *src,
-                  const Metadata *srcType,
-                  const Metadata *targetType,
-                  DynamicCastFlags flags)
-    SWIFT_CC(RegisterPreservingCC);
-
-/// \brief Checked dynamic cast to a Swift class type.
-///
-/// \param object The object to cast.
-/// \param targetType The type to which we are casting, which is known to be
-/// a Swift class type.
-///
-/// \returns the object if the cast succeeds, or null otherwise.
-SWIFT_RT_ENTRY_VISIBILITY
-extern "C" const void *
-swift_dynamicCastClass(const void *object, const ClassMetadata *targetType)
-    SWIFT_CC(RegisterPreservingCC);
-
-/// \brief Unconditional, checked dynamic cast to a Swift class type.
-///
-/// Aborts if the object isn't of the target type.
-///
-/// \param object The object to cast.
-/// \param targetType The type to which we are casting, which is known to be
-/// a Swift class type.
-///
-/// \returns the object.
-SWIFT_RUNTIME_EXPORT
-extern "C" const void *
-swift_dynamicCastClassUnconditional(const void *object,
-                                    const ClassMetadata *targetType);
-
-#if SWIFT_OBJC_INTEROP
-/// \brief Checked Objective-C-style dynamic cast to a class type.
-///
-/// \param object The object to cast, or nil.
-/// \param targetType The type to which we are casting, which is known to be
-/// a class type, but not necessarily valid type metadata.
-///
-/// \returns the object if the cast succeeds, or null otherwise.
-SWIFT_RUNTIME_EXPORT
-extern "C" const void *
-swift_dynamicCastObjCClass(const void *object, const ClassMetadata *targetType);
-
-/// \brief Checked dynamic cast to a foreign class type.
-///
-/// \param object The object to cast, or nil.
-/// \param targetType The type to which we are casting, which is known to be
-/// a foreign class type.
-///
-/// \returns the object if the cast succeeds, or null otherwise.
-SWIFT_RUNTIME_EXPORT
-extern "C" const void *
-swift_dynamicCastForeignClass(const void *object,
-                              const ForeignClassMetadata *targetType);
-
-/// \brief Unconditional, checked, Objective-C-style dynamic cast to a class
-/// type.
-///
-/// Aborts if the object isn't of the target type.
-/// Note that unlike swift_dynamicCastClassUnconditional, this does not abort
-/// if the object is 'nil'.
-///
-/// \param object The object to cast, or nil.
-/// \param targetType The type to which we are casting, which is known to be
-/// a class type, but not necessarily valid type metadata.
-///
-/// \returns the object.
-SWIFT_RUNTIME_EXPORT
-extern "C" const void *
-swift_dynamicCastObjCClassUnconditional(const void *object,
-                                        const ClassMetadata *targetType);
-
-/// \brief Unconditional, checked dynamic cast to a foreign class type.
-///
-/// \param object The object to cast, or nil.
-/// \param targetType The type to which we are casting, which is known to be
-/// a foreign class type.
-///
-/// \returns the object if the cast succeeds, or null otherwise.
-SWIFT_RUNTIME_EXPORT
-extern "C" const void *
-swift_dynamicCastForeignClassUnconditional(
-  const void *object,
-  const ForeignClassMetadata *targetType);
-#endif
-
-/// \brief Checked dynamic cast of a class instance pointer to the given type.
-///
-/// \param object The class instance to cast.
-///
-/// \param targetType The type to which we are casting, which may be either a
-/// class type or a wrapped Objective-C class type.
-///
-/// \returns the object, or null if it doesn't have the given target type.
-SWIFT_RUNTIME_EXPORT
-extern "C" const void *
-swift_dynamicCastUnknownClass(const void *object, const Metadata *targetType);
-
-/// \brief Unconditional checked dynamic cast of a class instance pointer to
-/// the given type.
-///
-/// Aborts if the object isn't of the target type.
-///
-/// \param object The class instance to cast.
-///
-/// \param targetType The type to which we are casting, which may be either a
-/// class type or a wrapped Objective-C class type.
-///
-/// \returns the object.
-SWIFT_RUNTIME_EXPORT
-extern "C" const void *
-swift_dynamicCastUnknownClassUnconditional(const void *object,
-                                           const Metadata *targetType);
-
-SWIFT_RUNTIME_EXPORT
-extern "C" const Metadata *
-swift_dynamicCastMetatype(const Metadata *sourceType,
-                          const Metadata *targetType);
-SWIFT_RUNTIME_EXPORT
-extern "C" const Metadata *
-swift_dynamicCastMetatypeUnconditional(const Metadata *sourceType,
-                                       const Metadata *targetType);
-#if SWIFT_OBJC_INTEROP
-SWIFT_RUNTIME_EXPORT
-extern "C" const ClassMetadata *
-swift_dynamicCastObjCClassMetatype(const ClassMetadata *sourceType,
-                                   const ClassMetadata *targetType);
-SWIFT_RUNTIME_EXPORT
-extern "C" const ClassMetadata *
-swift_dynamicCastObjCClassMetatypeUnconditional(const ClassMetadata *sourceType,
-                                                const ClassMetadata *targetType);
-#endif
-
-SWIFT_RUNTIME_EXPORT
-extern "C" const ClassMetadata *
-swift_dynamicCastForeignClassMetatype(const ClassMetadata *sourceType,
-                                   const ClassMetadata *targetType);
-SWIFT_RUNTIME_EXPORT
-extern "C" const ClassMetadata *
-swift_dynamicCastForeignClassMetatypeUnconditional(
-  const ClassMetadata *sourceType,
-  const ClassMetadata *targetType);
-
-/// \brief Return the dynamic type of an opaque value.
-///
-/// \param value An opaque value.
-/// \param self  The static type metadata for the opaque value.
-SWIFT_RUNTIME_EXPORT
-extern "C" const Metadata *
-swift_getDynamicType(OpaqueValue *value, const Metadata *self);
-
-/// \brief Fetch the type metadata associated with the formal dynamic
-/// type of the given (possibly Objective-C) object.  The formal
-/// dynamic type ignores dynamic subclasses such as those introduced
-/// by KVO.
-///
-/// The object pointer may be a tagged pointer, but cannot be null.
-SWIFT_RUNTIME_EXPORT
-extern "C" const Metadata *swift_getObjectType(HeapObject *object);
 
 /// \brief Perform a copy-assignment from one existential container to another.
 /// Both containers must be of the same existential type representable with the
 /// same number of witness tables.
 SWIFT_RUNTIME_EXPORT
-extern "C" OpaqueValue *swift_assignExistentialWithCopy(OpaqueValue *dest,
+OpaqueValue *swift_assignExistentialWithCopy(OpaqueValue *dest,
                                              const OpaqueValue *src,
                                              const Metadata *type);
 
@@ -3318,7 +3204,7 @@ inline int swift_getFunctionPointerExtraInhabitantIndex(void * const* src) {
 inline void swift_storeFunctionPointerExtraInhabitant(void **dest, int index) {
   // This must be consistent with the storeFunctionPointerExtraInhabitantIndex
   // implementation in IRGen's ExtraInhabitants.cpp.
-  *dest = reinterpret_cast<void*>((unsigned) index);
+  *dest = reinterpret_cast<void*>(static_cast<uintptr_t>(index));
 }
 
 /// Return the number of extra inhabitants in a function pointer.
@@ -3333,37 +3219,26 @@ inline constexpr unsigned swift_getFunctionPointerExtraInhabitantCount() {
     ? (unsigned)INT_MAX
     : (unsigned)(LeastValidPointerValue);
 }
-  
-/// \brief Check whether a type conforms to a given native Swift protocol,
-/// visible from the named module.
-///
-/// If so, returns a pointer to the witness table for its conformance.
-/// Returns void if the type does not conform to the protocol.
-///
-/// \param type The metadata for the type for which to do the conformance
-///             check.
-/// \param protocol The protocol descriptor for the protocol to check
-///                 conformance for.
-SWIFT_RUNTIME_EXPORT
-extern "C"
-const WitnessTable *swift_conformsToProtocol(const Metadata *type,
-                                            const ProtocolDescriptor *protocol);
+
+/// Return the type name for a given type metadata.
+std::string nameForMetadata(const Metadata *type,
+                            bool qualified = true);
 
 /// Register a block of protocol conformance records for dynamic lookup.
 SWIFT_RUNTIME_EXPORT
-extern "C"
 void swift_registerProtocolConformances(const ProtocolConformanceRecord *begin,
                                         const ProtocolConformanceRecord *end);
 
 /// Register a block of type metadata records dynamic lookup.
 SWIFT_RUNTIME_EXPORT
-extern "C"
 void swift_registerTypeMetadataRecords(const TypeMetadataRecord *begin,
                                        const TypeMetadataRecord *end);
 
-/// Return the type name for a given type metadata.
-std::string nameForMetadata(const Metadata *type,
-                            bool qualified = true);
+/// Return the superclass, if any.  The result is nullptr for root
+/// classes and class protocol types.
+SWIFT_CC(swift)
+SWIFT_RUNTIME_STDLIB_INTERFACE
+const Metadata *_swift_class_getSuperclass(const Metadata *theClass);
 
 } // end namespace swift
 

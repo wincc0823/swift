@@ -1,10 +1,15 @@
-// RUN: %target-run-simple-swift | FileCheck %s
+// RUN: %target-run-simple-swift | %FileCheck %s
 // REQUIRES: executable_test
 
-// FIXME: Clang miscompiles GLKit functions on i386. rdar://problem/19184403
-// XFAIL: CPU=i386
+// NOTE: Clang used to miscompile GLKit functions on i386. rdar://problem/19184403
 
+// On i386, it seems to work optimized mode, but fails in non-optimized.
+// rdar://problem/26392402
+// UNSUPPORTED: CPU=i386
 // REQUIRES: objc_interop
+
+// GLKit is not available on watchOS.
+// UNSUPPORTED: OS=watchos
 
 import GLKit
 
@@ -25,8 +30,8 @@ print(GLKVector4DotProduct(x, y)) // CHECK-NEXT: 0.0
 let z2 = GLKVector4CrossProduct(x, y)
 print(GLKVector4AllEqualToVector4(z, z2)) // CHECK-NEXT: true
 
-infix operator • { precedence 150 associativity left }
-infix operator ⨉ { precedence 150 }
+infix operator • : MultiplicationPrecedence
+infix operator ⨉ : MultiplicationPrecedence
 func •(x: GLKVector4, y: GLKVector4) -> Float {
   return GLKVector4DotProduct(x, y)
 }

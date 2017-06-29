@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -26,6 +26,8 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Regex.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <vector>
 
 namespace swift {
 namespace json {
@@ -445,6 +447,16 @@ private:
   void indent();
 };
 
+template <typename T> struct ArrayTraits<std::vector<T>> {
+  static size_t size(Output &out, std::vector<T> &seq) { return seq.size(); }
+
+  static T &element(Output &out, std::vector<T> &seq, size_t index) {
+    if (index >= seq.size())
+      seq.resize(index + 1);
+    return seq[index];
+  }
+};
+
 template<>
 struct ScalarTraits<bool> {
   static void output(const bool &, llvm::raw_ostream &);
@@ -480,6 +492,16 @@ struct ScalarTraits<uint32_t> {
   static void output(const uint32_t &, llvm::raw_ostream &);
   static bool mustQuote(StringRef) { return false; }
 };
+
+#if defined(_MSC_VER)
+// In MSVC, 'unsigned long' is 32bit size and different from uint32_t,
+// and it is used to define swift::sys::ProcessId.
+template<>
+struct ScalarTraits<unsigned long> {
+  static void output(const unsigned long &, llvm::raw_ostream &);
+  static bool mustQuote(StringRef) { return false; }
+};
+#endif
 
 template<>
 struct ScalarTraits<uint64_t> {

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -34,6 +34,7 @@ namespace swift {
   class CompilerInstance;
   class CompilerInvocation;
   class Decl;
+  class Type;
   class AbstractStorageDecl;
   class SourceFile;
   class ValueDecl;
@@ -46,7 +47,13 @@ namespace ide {
   enum class SyntaxNodeKind : uint8_t;
   enum class SyntaxStructureKind : uint8_t;
   enum class SyntaxStructureElementKind : uint8_t;
+  enum class RangeKind : int8_t;
   class CodeCompletionConsumer;
+
+  enum class NameKind {
+    ObjC,
+    Swift,
+  };
 }
 }
 
@@ -55,6 +62,7 @@ namespace SourceKit {
   typedef RefPtr<ImmutableTextSnapshot> ImmutableTextSnapshotRef;
   class SwiftASTManager;
   class SwiftLangSupport;
+  class Context;
 
 class SwiftEditorDocument :
     public ThreadSafeRefCountedBase<SwiftEditorDocument> {
@@ -247,18 +255,30 @@ public:
   static SourceKit::UIdent getUIDForSyntaxStructureElementKind(
       swift::ide::SyntaxStructureElementKind Kind);
 
-  static SourceKit::UIdent getUIDForSymbol(swift::index::SymbolKind kind,
-                                           swift::index::SymbolSubKindSet subKinds,
+  static SourceKit::UIdent getUIDForSymbol(swift::index::SymbolInfo sym,
                                            bool isRef);
+
+  static SourceKit::UIdent getUIDForRangeKind(swift::ide::RangeKind Kind);
 
   static std::vector<UIdent> UIDsFromDeclAttributes(const swift::DeclAttributes &Attrs);
 
+  static SourceKit::UIdent getUIDForNameKind(swift::ide::NameKind Kind);
+
+  static swift::ide::NameKind getNameKindForUID(SourceKit::UIdent Id);
 
   static bool printDisplayName(const swift::ValueDecl *D, llvm::raw_ostream &OS);
 
   /// Generate a USR for a Decl, including the prefix.
   /// \returns true if the results should be ignored, false otherwise.
   static bool printUSR(const swift::ValueDecl *D, llvm::raw_ostream &OS);
+
+  /// Generate a USR for the Type of a given decl.
+  /// \returns true if the results should be ignored, false otherwise.
+  static bool printDeclTypeUSR(const swift::ValueDecl *D, llvm::raw_ostream &OS);
+
+  /// Generate a USR for of a given type.
+  /// \returns true if the results should be ignored, false otherwise.
+  static bool printTypeUSR(swift::Type Ty, llvm::raw_ostream &OS);
 
   /// Generate a USR for an accessor, including the prefix.
   /// \returns true if the results should be ignored, false otherwise.
@@ -330,11 +350,16 @@ public:
                            bool SynthesizedExtensions,
                            Optional<StringRef> InterestedUSR) override;
 
+  void editorOpenTypeInterface(EditorConsumer &Consumer,
+                               ArrayRef<const char *> Args,
+                               StringRef TypeUSR) override;
+
   void editorOpenHeaderInterface(EditorConsumer &Consumer,
                                  StringRef Name,
                                  StringRef HeaderName,
                                  ArrayRef<const char *> Args,
-                                 bool SynthesizedExtensions) override;
+                                 bool SynthesizedExtensions,
+                                 Optional<unsigned> swiftVersion) override;
 
   void editorOpenSwiftSourceInterface(StringRef Name,
                                       StringRef SourceName,
@@ -356,18 +381,34 @@ public:
   void editorExtractTextFromComment(StringRef Source,
                                     EditorConsumer &Consumer) override;
 
+  void editorConvertMarkupToXML(StringRef Source,
+                                EditorConsumer &Consumer) override;
+
   void editorExpandPlaceholder(StringRef Name, unsigned Offset, unsigned Length,
                                EditorConsumer &Consumer) override;
 
   void getCursorInfo(StringRef Filename, unsigned Offset,
+                     unsigned Length, bool Actionables,
+                     bool CancelOnSubsequentRequest,
                      ArrayRef<const char *> Args,
                      std::function<void(const CursorInfo &)> Receiver) override;
 
+  void getNameInfo(StringRef Filename, unsigned Offset,
+                   NameTranslatingInfo &Input,
+                   ArrayRef<const char *> Args,
+                   std::function<void(const NameTranslatingInfo &)> Receiver) override;
+
+  void getRangeInfo(StringRef Filename, unsigned Offset, unsigned Length,
+                    bool CancelOnSubsequentRequest, ArrayRef<const char *> Args,
+                    std::function<void(const RangeInfo&)> Receiver) override;
+
   void getCursorInfoFromUSR(
-      StringRef Filename, StringRef USR, ArrayRef<const char *> Args,
+      StringRef Filename, StringRef USR, bool CancelOnSubsequentRequest,
+      ArrayRef<const char *> Args,
       std::function<void(const CursorInfo &)> Receiver) override;
 
   void findRelatedIdentifiersInFile(StringRef Filename, unsigned Offset,
+                                    bool CancelOnSubsequentRequest,
                                     ArrayRef<const char *> Args,
               std::function<void(const RelatedIdentsInfo &)> Receiver) override;
 
@@ -390,7 +431,7 @@ namespace trace {
   void initTraceInfo(trace::SwiftInvocation &SwiftArgs,
                      StringRef InputFile,
                      ArrayRef<const char *> Args);
-  
+
   void initTraceFiles(trace::SwiftInvocation &SwiftArgs,
                       swift::CompilerInstance &CI);
 }
@@ -406,6 +447,6 @@ public:
   ~CloseClangModuleFiles();
 };
 
-} // namespace SourceKit.
+} // namespace SourceKit
 
 #endif

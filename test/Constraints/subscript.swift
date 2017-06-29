@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 // Simple subscript of arrays:
 func simpleSubscript(_ array: [Float], x: Int) -> Float {
@@ -70,9 +70,7 @@ extension Int {
 
 let _ = 1["1"]  // expected-error {{ambiguous use of 'subscript'}}
 
-
-// rdar://17687826 - QoI: error message when reducing to an untyped dictionary isn't helpful
-let squares = [ 1, 2, 3 ].reduce([:]) { (dict, n) in // expected-error {{expression type '[_ : _]' is ambiguous without more context}}
+let squares = [ 1, 2, 3 ].reduce([:]) { (dict, n) in
   var dict = dict
   dict[n] = n * n
   return dict
@@ -95,3 +93,26 @@ struct SR718 {
 
 SR718()[a: Int()] // expected-error {{cannot convert value of type 'Int' to expected argument type 'UInt'}}
 
+// rdar://problem/25601561 - Qol: Bad diagnostic for failed assignment from Any to more specific type
+
+struct S_r25601561 {
+  func value() -> Any? { return "hi" }
+}
+
+class C_r25601561 {
+  var a: [S_r25601561?] = []
+  func test(i: Int) -> String {
+    let s: String = a[i]!.value()! // expected-error {{cannot convert value of type 'Any' to specified type 'String'}}
+    return s
+  }
+}
+
+// rdar://problem/31977679 - Misleading diagnostics when using subscript with incorrect argument
+
+func r31977679_1(_ properties: [String: String]) -> Any? {
+  return properties[0] // expected-error {{cannot subscript a value of type '[String : String]' with an index of type 'Int'}}
+}
+
+func r31977679_2(_ properties: [String: String]) -> Any? {
+  return properties["foo"] // Ok
+}

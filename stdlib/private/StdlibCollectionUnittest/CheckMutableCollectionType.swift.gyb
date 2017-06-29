@@ -2,17 +2,17 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 import StdlibUnittest
 
-// These tests are shared between partition() and sort().
+// These tests are shared between partition(by:) and sort().
 public struct PartitionExhaustiveTest {
   public let sequence: [Int]
   public let loc: SourceLoc
@@ -25,6 +25,8 @@ public struct PartitionExhaustiveTest {
     self.loc = SourceLoc(file, line, comment: "test data")
   }
 }
+
+enum SillyError : Error { case JazzHands }
 
 public let partitionExhaustiveTests = [
   PartitionExhaustiveTest([]),
@@ -48,7 +50,21 @@ public let partitionExhaustiveTests = [
   PartitionExhaustiveTest([ 10, 20, 30, 40, 50, 60 ]),
 ]
 
-public func withInvalidOrderings(_ body: ((Int, Int) -> Bool) -> Void) {
+//Random collection of 30 elements
+ public let largeElementSortTests = [
+   [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
+   [30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18,
+     17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+   [30, 29, 28, 27, 26, 25,  20, 19, 18, 5, 4, 3, 2, 1,
+     15, 14, 13, 12, 11, 10, 9, 24, 23, 22, 21, 8, 17, 16, 7, 6],
+   [30, 29, 25, 20, 19, 18, 5, 4, 3, 2, 1, 28, 27, 26,
+     15, 14, 13, 12,  24, 23, 22, 21, 8, 17, 16, 7, 6,  11, 10, 9],
+   [3, 2, 1, 20, 19, 18, 5, 4, 28, 27, 26, 11, 10, 9,
+     15, 14, 13, 12,  24, 23, 22, 21, 8, 17, 16, 7, 6, 30, 29, 25],
+ ]
+
+public func withInvalidOrderings(_ body: (@escaping (Int, Int) -> Bool) -> Void) {
   // Test some ordering predicates that don't create strict weak orderings
   body { (_,_) in true }
   body { (_,_) in false }
@@ -58,17 +74,25 @@ public func withInvalidOrderings(_ body: ((Int, Int) -> Bool) -> Void) {
   body { (_,_) in defer {i += 1}; return i % 5 == 0 }
 }
 
-internal func _mapInPlace<
-  C : MutableCollection
-  where
-  C.Indices.Iterator.Element == C.Index
->(
+internal func _mapInPlace<C : MutableCollection>(
   _ elements: inout C,
-  _ transform: @noescape (C.Iterator.Element) -> C.Iterator.Element
+  _ transform: (C.Iterator.Element) -> C.Iterator.Element
 ) {
   for i in elements.indices {
     elements[i] = transform(elements[i])
   }
+}
+
+internal func makeBufferAccessLoggingMutableCollection<
+  C
+>(wrapping c: C) -> BufferAccessLoggingMutableBidirectionalCollection<C> {
+  return BufferAccessLoggingMutableBidirectionalCollection(wrapping: c)
+}
+
+internal func makeBufferAccessLoggingMutableCollection<
+  C
+>(wrapping c: C) -> BufferAccessLoggingMutableRandomAccessCollection<C> {
+  return BufferAccessLoggingMutableRandomAccessCollection(wrapping: c)
 }
 
 extension TestSuite {
@@ -76,31 +100,19 @@ extension TestSuite {
     C : MutableCollection,
     CollectionWithEquatableElement : MutableCollection,
     CollectionWithComparableElement : MutableCollection
-    where
-    C.SubSequence : MutableCollection,
-    C.SubSequence.Iterator.Element == C.Iterator.Element,
-    C.SubSequence.Index == C.Index,
-    C.SubSequence.Indices.Iterator.Element == C.Index,
-    C.SubSequence.SubSequence == C.SubSequence,
-    C.Indices : Collection,
-    C.Indices.Iterator.Element == C.Index,
-    C.Indices.Index == C.Index,
-    C.Indices.SubSequence == C.Indices,
-    CollectionWithEquatableElement.Iterator.Element : Equatable,
-    CollectionWithComparableElement.Iterator.Element : Comparable
   >(
     _ testNamePrefix: String = "",
-    makeCollection: ([C.Iterator.Element]) -> C,
-    wrapValue: (OpaqueValue<Int>) -> C.Iterator.Element,
-    extractValue: (C.Iterator.Element) -> OpaqueValue<Int>,
+    makeCollection: @escaping ([C.Iterator.Element]) -> C,
+    wrapValue: @escaping (OpaqueValue<Int>) -> C.Iterator.Element,
+    extractValue: @escaping (C.Iterator.Element) -> OpaqueValue<Int>,
 
-    makeCollectionOfEquatable: ([CollectionWithEquatableElement.Iterator.Element]) -> CollectionWithEquatableElement,
-    wrapValueIntoEquatable: (MinimalEquatableValue) -> CollectionWithEquatableElement.Iterator.Element,
-    extractValueFromEquatable: ((CollectionWithEquatableElement.Iterator.Element) -> MinimalEquatableValue),
+    makeCollectionOfEquatable: @escaping ([CollectionWithEquatableElement.Iterator.Element]) -> CollectionWithEquatableElement,
+    wrapValueIntoEquatable: @escaping (MinimalEquatableValue) -> CollectionWithEquatableElement.Iterator.Element,
+    extractValueFromEquatable: @escaping ((CollectionWithEquatableElement.Iterator.Element) -> MinimalEquatableValue),
 
-    makeCollectionOfComparable: ([CollectionWithComparableElement.Iterator.Element]) -> CollectionWithComparableElement,
-    wrapValueIntoComparable: (MinimalComparableValue) -> CollectionWithComparableElement.Iterator.Element,
-    extractValueFromComparable: ((CollectionWithComparableElement.Iterator.Element) -> MinimalComparableValue),
+    makeCollectionOfComparable: @escaping ([CollectionWithComparableElement.Iterator.Element]) -> CollectionWithComparableElement,
+    wrapValueIntoComparable: @escaping (MinimalComparableValue) -> CollectionWithComparableElement.Iterator.Element,
+    extractValueFromComparable: @escaping ((CollectionWithComparableElement.Iterator.Element) -> MinimalComparableValue),
 
     resiliencyChecks: CollectionMisuseResiliencyChecks = .all,
     outOfBoundsIndexOffset: Int = 1,
@@ -108,13 +120,19 @@ extension TestSuite {
     withUnsafeMutableBufferPointerIsSupported: Bool,
     isFixedLengthCollection: Bool,
     collectionIsBidirectional: Bool = false
-  ) {
+  ) where
+    C.SubSequence : MutableCollection,
+    C.Indices : Collection,
+    CollectionWithEquatableElement.Iterator.Element : Equatable,
+    CollectionWithComparableElement.Iterator.Element : Comparable {
+
     var testNamePrefix = testNamePrefix
 
-    if checksAdded.contains(#function) {
+    if !checksAdded.insert(
+        "\(testNamePrefix).\(C.self).\(#function)"
+      ).inserted {
       return
     }
-    checksAdded.insert(#function)
 
     addCollectionTests(
       testNamePrefix,
@@ -140,7 +158,7 @@ extension TestSuite {
       return makeCollectionOfComparable(elements.map(wrapValueIntoComparable))
     }
 
-    testNamePrefix += String(C.Type)
+    testNamePrefix += String(describing: C.Type.self)
 
 //===----------------------------------------------------------------------===//
 // subscript(_: Index)
@@ -163,7 +181,7 @@ if resiliencyChecks.subscriptOnOutOfBoundsIndicesBehavior != .none {
     c[index] = wrapValue(OpaqueValue(9999))
   }
 
-  let tests = _product(
+  let tests = cartesianProduct(
     subscriptRangeTests,
     _SubSequenceSubscriptOnIndexMode.all)
 
@@ -242,8 +260,7 @@ self.test("\(testNamePrefix).subscript(_: Range)/Set/semantics") {
 
       let newElements = makeWrappedCollection(
         test.expected.map { OpaqueValue($0.value + 90000) })
-      c[test.bounds(in: c)] =
-        newElements[newElements.startIndex..<newElements.endIndex]
+      c[test.bounds(in: c)] = newElements[...]
 
       // FIXME: improve checkForwardCollection to check the SubSequence type.
       /*
@@ -285,8 +302,7 @@ if isFixedLengthCollection {
     let newElements = makeWrappedCollection([ 91010, 92020, 93030, 94040 ].map(OpaqueValue.init))
 
     expectCrashLater()
-    c[c.startIndex..<c.endIndex] =
-      newElements[newElements.startIndex..<newElements.endIndex]
+    c[...] = newElements[...]
   }
 
   self.test("\(testNamePrefix).subscript(_: Range)/Set/SmallerRange") {
@@ -294,8 +310,7 @@ if isFixedLengthCollection {
     let newElements = makeWrappedCollection([ 91010, 92020 ].map(OpaqueValue.init))
 
     expectCrashLater()
-    c[c.startIndex..<c.endIndex] =
-      newElements[newElements.startIndex..<newElements.endIndex]
+    c[...] = newElements[...]
   }
 } else {
   self.test("\(testNamePrefix).subscript(_: Range)/Set/DifferentlySizedRange") {
@@ -304,8 +319,7 @@ if isFixedLengthCollection {
       let newElements = makeWrappedCollection(test.newElements)
       let rangeToReplace = test.rangeSelection.range(in: c)
 
-      c[rangeToReplace] =
-        newElements[newElements.startIndex..<newElements.endIndex]
+      c[rangeToReplace] = newElements[...]
 
       expectEqualSequence(
         test.expected,
@@ -316,7 +330,7 @@ if isFixedLengthCollection {
 }
 
 if resiliencyChecks.subscriptRangeOnOutOfBoundsRangesBehavior != .none {
-  let tests = _product(
+  let tests = cartesianProduct(
     subscriptRangeTests,
     _SubSequenceSubscriptOnRangeMode.all)
 
@@ -349,8 +363,7 @@ if resiliencyChecks.subscriptRangeOnOutOfBoundsRangesBehavior != .none {
             let newValues = makeWrappedCollection(
               elements[i..<j].map { OpaqueValue($0.value + 90000) }
             )
-            slice[subSliceStartIndex..<subSliceEndIndex]
-              = newValues[newValues.startIndex..<newValues.endIndex]
+            slice[subSliceStartIndex..<subSliceEndIndex] = newValues[...]
             let subSlice = slice[subSliceStartIndex..<subSliceEndIndex]
             for (k, index) in subSlice.indices.enumerated() {
               expectEqual(
@@ -364,8 +377,7 @@ if resiliencyChecks.subscriptRangeOnOutOfBoundsRangesBehavior != .none {
                 extractValue(subSlice[index]).value)
             }
             let oldValues = makeWrappedCollection(Array(elements[i..<j]))
-            slice[subSliceStartIndex..<subSliceEndIndex]
-              = oldValues[oldValues.startIndex..<oldValues.endIndex]
+            slice[subSliceStartIndex..<subSliceEndIndex] = oldValues[...]
           }
         }
       }
@@ -419,7 +431,7 @@ if resiliencyChecks.subscriptRangeOnOutOfBoundsRangesBehavior != .none {
     let count: Int = numericCast(
       base.distance(from: bounds.lowerBound, to: bounds.upperBound))
     let newValues = makeWrappedCollection(Array(elements[0..<count]))
-    let newSlice = newValues[newValues.startIndex..<newValues.endIndex]
+    let newSlice = newValues[...]
 
     expectCrashLater()
     slice[bounds] = newSlice
@@ -443,7 +455,7 @@ self.test("\(testNamePrefix)._withUnsafeMutableBufferPointerIfSupported()/semant
     if withUnsafeMutableBufferPointerIsSupported {
       expectEqualSequence(test.collection, result!.value) { $0.value == $1.value }
     } else {
-      expectEmpty(result)
+      expectNil(result)
     }
   }
 }
@@ -451,6 +463,61 @@ self.test("\(testNamePrefix)._withUnsafeMutableBufferPointerIfSupported()/semant
 //===----------------------------------------------------------------------===//
 // sort()
 //===----------------------------------------------------------------------===//
+
+func checkSortedPredicateThrow(
+  sequence: [Int],
+  lessImpl: ((Int, Int) -> Bool),
+  throwIndex: Int
+) {
+  let extract = extractValue
+  let throwElement = sequence[throwIndex]
+  var thrown = false
+  let elements: [OpaqueValue<Int>] =
+    zip(sequence, 0..<sequence.count).map {
+      OpaqueValue($0, identity: $1)
+    }
+  var result: [C.Iterator.Element] = []
+  let c = makeWrappedCollection(elements)
+  let closureLifetimeTracker = LifetimeTracked(0)
+  do {
+    result = try c.sorted {
+      (lhs, rhs) throws -> Bool in
+      _blackHole(closureLifetimeTracker)
+      if throwElement == extractValue(rhs).value {
+        thrown = true
+        throw SillyError.JazzHands
+      }
+      return lessImpl(extractValue(lhs).value, extractValue(rhs).value)
+    }
+  } catch {}
+
+  // Check that the original collection is unchanged.
+  expectEqualSequence(
+    elements.map { $0.value },
+    c.map { extract($0).value })
+   
+  // If `sorted` throws then result will be empty else
+  // returned result must be sorted.
+  if thrown {
+    expectEqual(0, result.count)
+  } else {
+    // Check that the elements are sorted.
+    let extractedResult = result.map(extract)
+    for i in extractedResult.indices {
+      if i != extractedResult.index(before: extractedResult.endIndex) {
+        let first = extractedResult[i].value
+        let second = extractedResult[extractedResult.index(after: i)].value
+        let result = lessImpl(second, first)
+        if result {
+          print("yep ** Result should be true \(result)")
+        } else {
+          print("yep ** Test passed result is false")
+        }
+        expectFalse(result)
+      }
+    }
+  }
+}
 
 % for predicate in [False, True]:
 
@@ -483,18 +550,18 @@ self.test("\(testNamePrefix).sorted/DispatchesThrough_withUnsafeMutableBufferPoi
   // This sort operation is not in-place.
   // The collection is copied into an array before sorting.
   expectEqual(
-    0, lc.log._withUnsafeMutableBufferPointerIfSupported[lc.dynamicType])
+    0, lc.log._withUnsafeMutableBufferPointerIfSupported[type(of: lc)])
   expectEqual(
     0,
-    lc.log._withUnsafeMutableBufferPointerIfSupportedNonNilReturns[lc.dynamicType])
+    lc.log._withUnsafeMutableBufferPointerIfSupportedNonNilReturns[type(of: lc)])
 
   expectEqualSequence([ 1, 2, 3, 4, 5 ], extractedResult.map { $0.value })
 }
 
 func checkSort_${'Predicate' if predicate else 'WhereElementIsComparable'}(
   sequence: [Int],
-  equalImpl: ((Int, Int) -> Bool),
-  lessImpl: ((Int, Int) -> Bool),
+  equalImpl: @escaping ((Int, Int) -> Bool),
+  lessImpl: @escaping ((Int, Int) -> Bool),
   verifyOrder: Bool
 ) {
 %   if predicate:
@@ -560,7 +627,7 @@ self.test("\(testNamePrefix).sorted/${'Predicate' if predicate else 'WhereElemen
 }
 
 self.test("\(testNamePrefix).sorted/${'Predicate' if predicate else 'WhereElementIsComparable'}/InvalidOrderings") {
-  withInvalidOrderings { (comparisonPredicate) in
+  withInvalidOrderings { (comparisonPredicate: @escaping (Int, Int) -> Bool) in
     for i in 0..<7 {
       forAllPermutations(i) { (sequence) in
         checkSort_${'Predicate' if predicate else 'WhereElementIsComparable'}(
@@ -576,54 +643,152 @@ self.test("\(testNamePrefix).sorted/${'Predicate' if predicate else 'WhereElemen
   }
 }
 
+self.test("\(testNamePrefix).sorted/ThrowingPredicate") {
+  for test in partitionExhaustiveTests {
+    forAllPermutations(test.sequence) { (sequence) in
+      for i in 0..<sequence.count {
+      checkSortedPredicateThrow(
+       sequence: sequence,
+       lessImpl: { $0 < $1 },
+       throwIndex: i)
+      }
+    }
+  }
+}
+
+self.test("\(testNamePrefix).sorted/ThrowingPredicateWithLargeNumberElements") {
+  for sequence in largeElementSortTests {
+      for i in 0..<sequence.count {
+      checkSortedPredicateThrow(
+       sequence: sequence,
+       lessImpl: { $0 < $1 },
+       throwIndex: i)
+    }
+  }
+}
+
 % end
+
+//===----------------------------------------------------------------------===//
+// partition(by:)
+//===----------------------------------------------------------------------===//
+
+func checkPartition(
+  sequence: [Int],
+  pivotValue: Int,
+  lessImpl: ((Int, Int) -> Bool),
+  verifyOrder: Bool
+) {
+  let elements: [OpaqueValue<Int>] =
+    zip(sequence, 0..<sequence.count).map {
+      OpaqueValue($0, identity: $1)
+    }
+
+  var c = makeWrappedCollection(elements)
+  let closureLifetimeTracker = LifetimeTracked(0)
+  let pivot = c.partition(by: { val in
+    _blackHole(closureLifetimeTracker)
+    return !lessImpl(extractValue(val).value, pivotValue)
+  })
+
+  // Check that we didn't lose any elements.
+  let identities = c.map { extractValue($0).identity }
+  expectEqualsUnordered(0..<sequence.count, identities)
+
+  if verifyOrder {
+    // All the elements in the first partition are less than the pivot
+    // value.
+    for i in c[c.startIndex..<pivot].indices {
+      expectLT(extractValue(c[i]).value, pivotValue)
+    }
+    // All the elements in the second partition are greater or equal to
+    // the pivot value.
+    for i in c[pivot..<c.endIndex].indices {
+      expectGE(extractValue(c[i]).value, pivotValue)
+    }
+  }
+}
+
+self.test("\(testNamePrefix).partition") {
+  for test in partitionExhaustiveTests {
+    forAllPermutations(test.sequence) { (sequence) in
+      checkPartition(
+        sequence: sequence,
+        pivotValue: sequence.first ?? 0,
+        lessImpl: { $0 < $1 },
+        verifyOrder: true)
+
+      // Pivot value where all elements will pass the partitioning predicate
+      checkPartition(
+        sequence: sequence,
+        pivotValue: Int.min,
+        lessImpl: { $0 < $1 },
+        verifyOrder: true)
+
+      // Pivot value where no element will pass the partitioning predicate
+      checkPartition(
+        sequence: sequence,
+        pivotValue: Int.max,
+        lessImpl: { $0 < $1 },
+        verifyOrder: true)
+    }
+  }
+}
+
+self.test("\(testNamePrefix).partition/InvalidOrderings") {
+  withInvalidOrderings { (comparisonPredicate) in
+    for i in 0..<7 {
+      forAllPermutations(i) { (sequence) in
+        checkPartition(
+          sequence: sequence,
+          pivotValue: sequence.first ?? 0,
+          lessImpl: comparisonPredicate,
+          verifyOrder: false)
+      }
+    }
+  }
+}
 
 //===----------------------------------------------------------------------===//
 
   } // addMutableCollectionTests
 
   public func addMutableBidirectionalCollectionTests<
-    C : protocol<BidirectionalCollection, MutableCollection>,
-    CollectionWithEquatableElement : protocol<BidirectionalCollection, MutableCollection>,
-    CollectionWithComparableElement : protocol<BidirectionalCollection, MutableCollection>
-    where
-    C.SubSequence : protocol<BidirectionalCollection, MutableCollection>,
-    C.SubSequence.Iterator.Element == C.Iterator.Element,
-    C.SubSequence.Index == C.Index,
-    C.SubSequence.Indices.Iterator.Element == C.Index,
-    C.SubSequence.SubSequence == C.SubSequence,
-    C.Indices : BidirectionalCollection,
-    C.Indices.Iterator.Element == C.Index,
-    C.Indices.Index == C.Index,
-    C.Indices.SubSequence == C.Indices,
-    CollectionWithEquatableElement.Iterator.Element : Equatable,
-    CollectionWithComparableElement.Iterator.Element : Comparable
+    C : BidirectionalCollection & MutableCollection,
+    CollectionWithEquatableElement : BidirectionalCollection & MutableCollection,
+    CollectionWithComparableElement : BidirectionalCollection & MutableCollection
   >(
     _ testNamePrefix: String = "",
-    makeCollection: ([C.Iterator.Element]) -> C,
-    wrapValue: (OpaqueValue<Int>) -> C.Iterator.Element,
-    extractValue: (C.Iterator.Element) -> OpaqueValue<Int>,
+    makeCollection: @escaping ([C.Iterator.Element]) -> C,
+    wrapValue: @escaping (OpaqueValue<Int>) -> C.Iterator.Element,
+    extractValue: @escaping (C.Iterator.Element) -> OpaqueValue<Int>,
 
-    makeCollectionOfEquatable: ([CollectionWithEquatableElement.Iterator.Element]) -> CollectionWithEquatableElement,
-    wrapValueIntoEquatable: (MinimalEquatableValue) -> CollectionWithEquatableElement.Iterator.Element,
-    extractValueFromEquatable: ((CollectionWithEquatableElement.Iterator.Element) -> MinimalEquatableValue),
+    makeCollectionOfEquatable: @escaping ([CollectionWithEquatableElement.Iterator.Element]) -> CollectionWithEquatableElement,
+    wrapValueIntoEquatable: @escaping (MinimalEquatableValue) -> CollectionWithEquatableElement.Iterator.Element,
+    extractValueFromEquatable: @escaping ((CollectionWithEquatableElement.Iterator.Element) -> MinimalEquatableValue),
 
-    makeCollectionOfComparable: ([CollectionWithComparableElement.Iterator.Element]) -> CollectionWithComparableElement,
-    wrapValueIntoComparable: (MinimalComparableValue) -> CollectionWithComparableElement.Iterator.Element,
-    extractValueFromComparable: ((CollectionWithComparableElement.Iterator.Element) -> MinimalComparableValue),
+    makeCollectionOfComparable: @escaping ([CollectionWithComparableElement.Iterator.Element]) -> CollectionWithComparableElement,
+    wrapValueIntoComparable: @escaping (MinimalComparableValue) -> CollectionWithComparableElement.Iterator.Element,
+    extractValueFromComparable: @escaping ((CollectionWithComparableElement.Iterator.Element) -> MinimalComparableValue),
 
     resiliencyChecks: CollectionMisuseResiliencyChecks = .all,
     outOfBoundsIndexOffset: Int = 1,
     outOfBoundsSubscriptOffset: Int = 1,
     withUnsafeMutableBufferPointerIsSupported: Bool,
     isFixedLengthCollection: Bool
-  ) {
+  ) where
+    C.SubSequence : BidirectionalCollection & MutableCollection,
+    C.Indices : BidirectionalCollection,
+    CollectionWithEquatableElement.Iterator.Element : Equatable,
+    CollectionWithComparableElement.Iterator.Element : Comparable {
+
     var testNamePrefix = testNamePrefix
 
-    if checksAdded.contains(#function) {
+    if !checksAdded.insert(
+        "\(testNamePrefix).\(C.self).\(#function)"
+      ).inserted {
       return
     }
-    checksAdded.insert(#function)
 
     addMutableCollectionTests(
       testNamePrefix,
@@ -661,7 +826,7 @@ self.test("\(testNamePrefix).sorted/${'Predicate' if predicate else 'WhereElemen
       return makeCollection(elements.map(wrapValue))
     }
 
-    testNamePrefix += String(C.Type)
+    testNamePrefix += String(describing: C.Type.self)
 
 //===----------------------------------------------------------------------===//
 // subscript(_: Index)
@@ -686,52 +851,90 @@ if resiliencyChecks.subscriptOnOutOfBoundsIndicesBehavior != .none {
 }
 
 //===----------------------------------------------------------------------===//
+// reverse()
+//===----------------------------------------------------------------------===//
+
+self.test("\(testNamePrefix).reverse()") {
+  for test in reverseTests {
+    var c = makeWrappedCollection(test.sequence.map(OpaqueValue.init))
+    c.reverse()
+    expectEqual(
+      test.expected, c.map { extractValue($0).value },
+      stackTrace: SourceLocStack().with(test.loc))
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// partition(by:)
+//===----------------------------------------------------------------------===//
+
+self.test("\(testNamePrefix).partition/DispatchesThrough_withUnsafeMutableBufferPointerIfSupported") {
+  let sequence = [ 5, 4, 3, 2, 1 ]
+  let elements: [OpaqueValue<Int>] =
+    zip(sequence, 0..<sequence.count).map {
+      OpaqueValue($0, identity: $1)
+    }
+  let c = makeWrappedCollection(elements)
+  var lc = makeBufferAccessLoggingMutableCollection(wrapping: c)
+
+  let closureLifetimeTracker = LifetimeTracked(0)
+  let first = c.first
+  let pivot = lc.partition(by: { val in
+    _blackHole(closureLifetimeTracker)
+    return !(extractValue(val).value < extractValue(first!).value)
+  })
+
+  expectEqual(
+    1, lc.log._withUnsafeMutableBufferPointerIfSupported[type(of: lc)])
+  expectEqual(
+    withUnsafeMutableBufferPointerIsSupported ? 1 : 0,
+    lc.log._withUnsafeMutableBufferPointerIfSupportedNonNilReturns[type(of: lc)])
+
+  expectEqual(4, lc.distance(from: lc.startIndex, to: pivot))
+  expectEqualsUnordered([1, 2, 3, 4], lc.prefix(upTo: pivot).map { extractValue($0).value })
+  expectEqualsUnordered([5], lc.suffix(from: pivot).map { extractValue($0).value })
+}
+
+//===----------------------------------------------------------------------===//
 
   } // addMutableBidirectionalCollectionTests
 
   public func addMutableRandomAccessCollectionTests<
-    C : protocol<RandomAccessCollection, MutableCollection>,
-    CollectionWithEquatableElement : protocol<RandomAccessCollection, MutableCollection>,
-    CollectionWithComparableElement : protocol<RandomAccessCollection, MutableCollection>
-    where
-    C.SubSequence : protocol<RandomAccessCollection, MutableCollection>,
-    C.SubSequence.Iterator.Element == C.Iterator.Element,
-    C.SubSequence.Index == C.Index,
-    C.SubSequence.Indices.Iterator.Element == C.Index,
-    C.SubSequence.SubSequence == C.SubSequence,
-    C.Indices : RandomAccessCollection,
-    C.Indices.Iterator.Element == C.Index,
-    C.Indices.Index == C.Index,
-    C.Indices.SubSequence == C.Indices,
-    CollectionWithEquatableElement.Iterator.Element : Equatable,
-    CollectionWithComparableElement.Iterator.Element : Comparable,
-    CollectionWithComparableElement.SubSequence.Indices.Iterator.Element == CollectionWithComparableElement.Index
+    C : RandomAccessCollection & MutableCollection,
+    CollectionWithEquatableElement : RandomAccessCollection & MutableCollection,
+    CollectionWithComparableElement : RandomAccessCollection & MutableCollection
   >(
     _ testNamePrefix: String = "",
-    makeCollection: ([C.Iterator.Element]) -> C,
-    wrapValue: (OpaqueValue<Int>) -> C.Iterator.Element,
-    extractValue: (C.Iterator.Element) -> OpaqueValue<Int>,
+    makeCollection: @escaping ([C.Iterator.Element]) -> C,
+    wrapValue: @escaping (OpaqueValue<Int>) -> C.Iterator.Element,
+    extractValue: @escaping (C.Iterator.Element) -> OpaqueValue<Int>,
 
-    makeCollectionOfEquatable: ([CollectionWithEquatableElement.Iterator.Element]) -> CollectionWithEquatableElement,
-    wrapValueIntoEquatable: (MinimalEquatableValue) -> CollectionWithEquatableElement.Iterator.Element,
-    extractValueFromEquatable: ((CollectionWithEquatableElement.Iterator.Element) -> MinimalEquatableValue),
+    makeCollectionOfEquatable: @escaping ([CollectionWithEquatableElement.Iterator.Element]) -> CollectionWithEquatableElement,
+    wrapValueIntoEquatable: @escaping (MinimalEquatableValue) -> CollectionWithEquatableElement.Iterator.Element,
+    extractValueFromEquatable: @escaping ((CollectionWithEquatableElement.Iterator.Element) -> MinimalEquatableValue),
 
-    makeCollectionOfComparable: ([CollectionWithComparableElement.Iterator.Element]) -> CollectionWithComparableElement,
-    wrapValueIntoComparable: (MinimalComparableValue) -> CollectionWithComparableElement.Iterator.Element,
-    extractValueFromComparable: ((CollectionWithComparableElement.Iterator.Element) -> MinimalComparableValue),
+    makeCollectionOfComparable: @escaping ([CollectionWithComparableElement.Iterator.Element]) -> CollectionWithComparableElement,
+    wrapValueIntoComparable: @escaping (MinimalComparableValue) -> CollectionWithComparableElement.Iterator.Element,
+    extractValueFromComparable: @escaping ((CollectionWithComparableElement.Iterator.Element) -> MinimalComparableValue),
 
     resiliencyChecks: CollectionMisuseResiliencyChecks = .all,
     outOfBoundsIndexOffset: Int = 1,
     outOfBoundsSubscriptOffset: Int = 1,
     withUnsafeMutableBufferPointerIsSupported: Bool,
     isFixedLengthCollection: Bool
-  ) {
+  ) where
+    C.SubSequence : RandomAccessCollection & MutableCollection,
+    C.Indices : RandomAccessCollection,
+    CollectionWithEquatableElement.Iterator.Element : Equatable,
+    CollectionWithComparableElement.Iterator.Element : Comparable {
+
     var testNamePrefix = testNamePrefix
 
-    if checksAdded.contains(#function) {
+    if !checksAdded.insert(
+        "\(testNamePrefix).\(C.self).\(#function)"
+      ).inserted {
       return
     }
-    checksAdded.insert(#function)
 
     addMutableBidirectionalCollectionTests(
       testNamePrefix,
@@ -773,18 +976,48 @@ if resiliencyChecks.subscriptOnOutOfBoundsIndicesBehavior != .none {
       return makeCollectionOfComparable(elements.map(wrapValueIntoComparable))
     }
 
-    testNamePrefix += String(C.Type)
+    testNamePrefix += String(describing: C.Type.self)
 
 //===----------------------------------------------------------------------===//
 // sort()
 //===----------------------------------------------------------------------===//
 
+func checkSortPredicateThrow(
+  sequence: [Int],
+  lessImpl: ((Int, Int) -> Bool),
+  throwIndex: Int
+) {
+  let extract = extractValue
+  let throwElement = sequence[throwIndex]
+  let elements: [OpaqueValue<Int>] =
+    zip(sequence, 0..<sequence.count).map {
+      OpaqueValue($0, identity: $1)
+    }
+  var c = makeWrappedCollection(elements)
+  let closureLifetimeTracker = LifetimeTracked(0)
+  do {
+    try c.sort {
+      (lhs, rhs) throws -> Bool in
+      _blackHole(closureLifetimeTracker)
+      if throwElement == extractValue(rhs).value {
+        throw SillyError.JazzHands
+      }
+      return lessImpl(extractValue(lhs).value, extractValue(rhs).value)
+    }
+  } catch {}
+  
+  //Check no element should lost and added
+  expectEqualsUnordered(
+    sequence,
+    c.map { extract($0).value })
+}
+
 % for predicate in [False, True]:
 
 func checkSortInPlace_${'Predicate' if predicate else 'WhereElementIsComparable'}(
   sequence: [Int],
-  equalImpl: ((Int, Int) -> Bool),
-  lessImpl: ((Int, Int) -> Bool),
+  equalImpl: @escaping ((Int, Int) -> Bool),
+  lessImpl: @escaping ((Int, Int) -> Bool),
   verifyOrder: Bool
 ) {
 %   if predicate:
@@ -847,7 +1080,7 @@ self.test("\(testNamePrefix).sort/${'Predicate' if predicate else 'WhereElementI
 }
 
 self.test("\(testNamePrefix).sort/${'Predicate' if predicate else 'WhereElementIsEquatable'}/InvalidOrderings") {
-  withInvalidOrderings { (comparisonPredicate) in
+  withInvalidOrderings { (comparisonPredicate : @escaping (Int, Int) -> Bool) in
     for i in 0..<7 {
       forAllPermutations(i) { (sequence) in
         checkSortInPlace_${'Predicate' if predicate else 'WhereElementIsComparable'}(
@@ -863,140 +1096,30 @@ self.test("\(testNamePrefix).sort/${'Predicate' if predicate else 'WhereElementI
   }
 }
 
-% end
-
-//===----------------------------------------------------------------------===//
-// partition()
-//===----------------------------------------------------------------------===//
-
-% for predicate in [False, True]:
-
-func checkPartition_${'Predicate' if predicate else 'WhereElementIsComparable'}(
-  sequence: [Int],
-  equalImpl: ((Int, Int) -> Bool),
-  lessImpl: ((Int, Int) -> Bool),
-  verifyOrder: Bool
-) {
-%   if predicate:
-  let extract = extractValue
-  let elements: [OpaqueValue<Int>] =
-    zip(sequence, 0..<sequence.count).map {
-      OpaqueValue($0, identity: $1)
-    }
-
-  var c = makeWrappedCollection(elements)
-%   else:
-  MinimalComparableValue.equalImpl.value = equalImpl
-  MinimalComparableValue.lessImpl.value = lessImpl
-
-  let extract = extractValueFromComparable
-  let elements: [MinimalComparableValue] =
-    zip(sequence, 0..<sequence.count).map {
-      MinimalComparableValue($0, identity: $1)
-    }
-
-  var c = makeWrappedCollectionWithComparableElement(elements)
-%   end
-
-%   if predicate:
-  let closureLifetimeTracker = LifetimeTracked(0)
-  let pivot = c.partition() {
-    (lhs, rhs) in
-    _blackHole(closureLifetimeTracker)
-    return extract(lhs).value < extract(rhs).value
-  }
-%   else:
-  let pivot = c.partition()
-%   end
-
-  // Check that we didn't lose any elements.
-  let identities = c.map { extract($0).identity }
-  expectEqualsUnordered(0..<sequence.count, identities)
-
-  if verifyOrder {
-    // All the elements in the first partition are less than the pivot
-    // value.
-    for i in c[c.startIndex..<pivot].indices {
-      expectLT(extract(c[i]).value, extract(c[pivot]).value)
-    }
-    // All the elements in the second partition are greater or equal to
-    // the pivot value.
-    for i in c[pivot..<c.endIndex].indices {
-      expectLE(extract(c[pivot]).value, extract(c[i]).value)
-    }
-  }
-}
-
-self.test("\(testNamePrefix).partition/${'Predicate' if predicate else 'WhereElementIsComparable'}") {
+self.test("\(testNamePrefix).sort/ThrowingPredicate") {
   for test in partitionExhaustiveTests {
     forAllPermutations(test.sequence) { (sequence) in
-      checkPartition_${'Predicate' if predicate else 'WhereElementIsComparable'}(
-        sequence: sequence,
-        equalImpl: { $0 == $1 },
-        lessImpl: { $0 < $1 },
-        verifyOrder: true)
-    }
-  }
-}
-
-self.test("\(testNamePrefix).partition/${'Predicate' if predicate else 'WhereElementIsComparable'}/InvalidOrderings") {
-  withInvalidOrderings { (comparisonPredicate) in
-    for i in 0..<7 {
-      forAllPermutations(i) { (sequence) in
-        checkPartition_${'Predicate' if predicate else 'WhereElementIsComparable'}(
-          sequence: sequence,
-          equalImpl: {
-            !comparisonPredicate($0, $1) &&
-            !comparisonPredicate($1, $0)
-          },
-          lessImpl: comparisonPredicate,
-          verifyOrder: false)
+      for i in 0..<sequence.count {
+        checkSortPredicateThrow(
+         sequence: sequence,
+         lessImpl: { $0 < $1 },
+         throwIndex: i)
       }
     }
   }
 }
 
-self.test("\(testNamePrefix).partition/DispatchesThrough_withUnsafeMutableBufferPointerIfSupported/${'Predicate' if predicate else 'WhereElementIsComparable'}") {
-  let sequence = [ 5, 4, 3, 2, 1 ]
-%   if predicate:
-  let extract = extractValue
-  let elements: [OpaqueValue<Int>] =
-    zip(sequence, 0..<sequence.count).map {
-      OpaqueValue($0, identity: $1)
+self.test("\(testNamePrefix).sort/ThrowingPredicateWithLargeNumberElements") {
+  for sequence in largeElementSortTests {
+    for i in 0..<sequence.count {
+      checkSortPredicateThrow(
+        sequence: sequence,
+        lessImpl: { $0 < $1 },
+        throwIndex: i)
     }
-  let c = makeWrappedCollection(elements)
-%   else:
-  let extract = extractValueFromComparable
-  let elements: [MinimalComparableValue] =
-    zip(sequence, 0..<sequence.count).map {
-      MinimalComparableValue($0, identity: $1)
-    }
-  let c = makeWrappedCollectionWithComparableElement(elements)
-%   end
-
-  var lc = LoggingMutableRandomAccessCollection(wrapping: c)
-
-%   if predicate:
-  let closureLifetimeTracker = LifetimeTracked(0)
-  let pivot = lc.partition() {
-    (lhs, rhs) in
-    _blackHole(closureLifetimeTracker)
-    return extract(lhs).value < extract(rhs).value
   }
-%   else:
-  let pivot = lc.partition()
-%   end
-
-  expectEqual(
-    1, lc.log._withUnsafeMutableBufferPointerIfSupported[lc.dynamicType])
-  expectEqual(
-    withUnsafeMutableBufferPointerIsSupported ? 1 : 0,
-    lc.log._withUnsafeMutableBufferPointerIfSupportedNonNilReturns[lc.dynamicType])
-
-  expectEqual(4, lc.distance(from: lc.startIndex, to: pivot))
-  expectEqualSequence([ 1, 4, 3, 2, 5 ], lc.map { extract($0).value })
 }
-
+ 
 % end
 
 //===----------------------------------------------------------------------===//

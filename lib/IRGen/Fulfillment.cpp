@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -19,8 +19,10 @@
 #include "IRGenModule.h"
 
 #include "swift/AST/Decl.h"
+#include "swift/AST/SubstitutionMap.h"
 #include "swift/SIL/TypeLowering.h"
 #include "GenericRequirement.h"
+#include "ProtocolInfo.h"
 
 using namespace swift;
 using namespace irgen;
@@ -38,6 +40,7 @@ static bool isLeafTypeMetadata(CanType type) {
   case TypeKind::ID:
 #define TYPE(ID, SUPER)
 #include "swift/AST/TypeNodes.def"
+  case TypeKind::Error:
     llvm_unreachable("kind is invalid for a canonical type");
 
 #define ARTIFICIAL_TYPE(ID, SUPER) \
@@ -82,7 +85,6 @@ static bool isLeafTypeMetadata(CanType type) {
 
   // Functions have component types.
   case TypeKind::Function:
-  case TypeKind::PolymorphicFunction:
   case TypeKind::GenericFunction:  // included for future-proofing
     return false;
 
@@ -105,7 +107,6 @@ static bool isLeafTypeMetadata(CanType type) {
 ///   metadata for the given type, false if it might be a subtype
 bool FulfillmentMap::searchTypeMetadata(IRGenModule &IGM, CanType type,
                                         IsExact_t isExact,
-                                        bool isSelfParameter,
                                         unsigned source, MetadataPath &&path,
                                         const InterestingKeysCallback &keys) {
 
@@ -115,8 +116,7 @@ bool FulfillmentMap::searchTypeMetadata(IRGenModule &IGM, CanType type,
     // If the type isn't a leaf type, also check it as an inexact match.
     bool hadFulfillment = false;
     if (!isLeafTypeMetadata(type)) {
-      hadFulfillment |= searchTypeMetadata(IGM, type, IsInexact,
-                                           isSelfParameter, source,
+      hadFulfillment |= searchTypeMetadata(IGM, type, IsInexact, source,
                                            MetadataPath(path), keys);
     }
 
@@ -131,7 +131,7 @@ bool FulfillmentMap::searchTypeMetadata(IRGenModule &IGM, CanType type,
     return searchNominalTypeMetadata(IGM, nomTy, source, std::move(path), keys);
   }
   if (auto boundTy = dyn_cast<BoundGenericType>(type)) {
-    return searchBoundGenericTypeMetadata(IGM, boundTy, source, isSelfParameter,
+    return searchBoundGenericTypeMetadata(IGM, boundTy, source,
                                           std::move(path), keys);
   }
 
@@ -180,22 +180,20 @@ bool FulfillmentMap::searchWitnessTable(IRGenModule &IGM,
 
   bool hadFulfillment = false;
 
-  auto nextInheritedIndex = 0;
-  for (auto inherited : protocol->getInheritedProtocols(nullptr)) {
-    auto index = nextInheritedIndex++;
+  auto &pi = IGM.getProtocolInfo(protocol);
 
-    // Ignore protocols that don't have witness tables.
-    if (!Lowering::TypeConverter::protocolRequiresWitnessTable(inherited))
-      continue;
+  for (auto &entry : pi.getWitnessEntries()) {
+    if (!entry.isBase()) continue;
 
+    ProtocolDecl *inherited = entry.getBase();
     MetadataPath inheritedPath = path;
-    inheritedPath.addInheritedProtocolComponent(index);
+    inheritedPath.addInheritedProtocolComponent(pi.getBaseWitnessIndex(&entry));
     hadFulfillment |= searchWitnessTable(IGM, type, inherited,
                                          source, std::move(inheritedPath),
                                          keys, interestingConformances);
   }
 
-  // If we're not limited the set of interesting conformances, or if
+  // If we're not limiting the set of interesting conformances, or if
   // this is an interesting conformance, record it.
   if (!interestingConformances || interestingConformances->count(protocol)) {
     hadFulfillment |= addFulfillment({type, protocol}, source, std::move(path));
@@ -214,13 +212,9 @@ bool FulfillmentMap::searchParentTypeMetadata(IRGenModule &IGM,
   // We might not have a parent type.
   if (!parent) return false;
 
-  // Only class types properly initialize their parent type.
-  if (!isa<ClassDecl>(decl)) return false;
-
   // If we do, it has to be nominal one way or another.
   path.addNominalParentComponent();
-  return searchTypeMetadata(IGM, parent, IsExact, /*is self*/ false,
-                            source, std::move(path), keys);
+  return searchTypeMetadata(IGM, parent, IsExact, source, std::move(path),keys);
 }
 
 bool FulfillmentMap::searchNominalTypeMetadata(IRGenModule &IGM,
@@ -237,34 +231,21 @@ bool FulfillmentMap::searchNominalTypeMetadata(IRGenModule &IGM,
 bool FulfillmentMap::searchBoundGenericTypeMetadata(IRGenModule &IGM,
                                                     CanBoundGenericType type,
                                                     unsigned source,
-                                                    bool isSelfParameter,
                                                     MetadataPath &&path,
                                          const InterestingKeysCallback &keys) {
   // Objective-C generics don't preserve their generic parameters at runtime,
-  // so they aren't able to fulfill type metadata requirements. However,
-  // if we have a method defined in Swift on an ObjC generic class, that
-  // method is restricted not to have access to the generic parameters, since
-  // it wouldn't be able to polymorphically. In this case, we still have to
-  // consider the self type to "fulfill" the type parameters so they don't
-  // get emitted as separate parameters.
+  // so they aren't able to fulfill type metadata requirements.
   if (type->getDecl()->hasClangNode()) {
-    if (isSelfParameter) {
-      // Represent the path as "impossible" so we crash if we accidentally do
-      // anything that needs the metadata.
-      path = MetadataPath();
-      path.addImpossibleComponent();
-    } else {
-      return false;
-    }
+    return false;
   }
   
   bool hadFulfillment = false;
 
   GenericTypeRequirements requirements(IGM, type->getDecl());
-  requirements.enumerateFulfillments(IGM,
-                  type->getSubstitutions(IGM.getSwiftModule(), nullptr),
-                                [&](unsigned reqtIndex, CanType arg,
-                                    Optional<ProtocolConformanceRef> conf) {
+  requirements.enumerateFulfillments(
+      IGM, type->getContextSubstitutionMap(IGM.getSwiftModule(), type->getDecl()),
+      [&](unsigned reqtIndex, CanType arg,
+          Optional<ProtocolConformanceRef> conf) {
     // Skip uninteresting type arguments.
     if (!keys.hasInterestingType(arg))
       return;
@@ -274,8 +255,7 @@ bool FulfillmentMap::searchBoundGenericTypeMetadata(IRGenModule &IGM,
       MetadataPath argPath = path;
       argPath.addNominalTypeArgumentComponent(reqtIndex);
       hadFulfillment |=
-        searchTypeMetadata(IGM, arg, IsExact, /*is self*/ false,
-                           source, std::move(argPath), keys);
+        searchTypeMetadata(IGM, arg, IsExact, source, std::move(argPath), keys);
       return;
     }
 

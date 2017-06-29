@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -85,22 +85,57 @@ static StringRef getPlatformNameForDarwin(const DarwinPlatformKind platform) {
 }
 
 StringRef swift::getPlatformNameForTriple(const llvm::Triple &triple) {
-  if (triple.isOSDarwin())
+  switch (triple.getOS()) {
+  case llvm::Triple::UnknownOS:
+    llvm_unreachable("unknown OS");
+  case llvm::Triple::CloudABI:
+  case llvm::Triple::DragonFly:
+  case llvm::Triple::Fuchsia:
+  case llvm::Triple::KFreeBSD:
+  case llvm::Triple::Lv2:
+  case llvm::Triple::NetBSD:
+  case llvm::Triple::OpenBSD:
+  case llvm::Triple::Solaris:
+  case llvm::Triple::Haiku:
+  case llvm::Triple::Minix:
+  case llvm::Triple::RTEMS:
+  case llvm::Triple::NaCl:
+  case llvm::Triple::CNK:
+  case llvm::Triple::Bitrig:
+  case llvm::Triple::AIX:
+  case llvm::Triple::CUDA:
+  case llvm::Triple::NVCL:
+  case llvm::Triple::AMDHSA:
+  case llvm::Triple::ELFIAMCU:
+  case llvm::Triple::Mesa3D:
+  case llvm::Triple::Contiki:
+    return "";
+  case llvm::Triple::Darwin:
+  case llvm::Triple::MacOSX:
+  case llvm::Triple::IOS:
+  case llvm::Triple::TvOS:
+  case llvm::Triple::WatchOS:
     return getPlatformNameForDarwin(getDarwinPlatformKind(triple));
-
-  if (triple.isAndroid())
-    return "android";
-
-  if (triple.isOSLinux())
-    return "linux";
-
-  if (triple.isOSFreeBSD())
+  case llvm::Triple::Linux:
+    return triple.isAndroid() ? "android" : "linux";
+  case llvm::Triple::FreeBSD:
     return "freebsd";
-
-  if (triple.isOSWindows())
-    return  "windows";
-
-  return "";
+  case llvm::Triple::Win32:
+    switch (triple.getEnvironment()) {
+    case llvm::Triple::Cygnus:
+      return "cygwin";
+    case llvm::Triple::GNU:
+      return "mingw";
+    case llvm::Triple::MSVC:
+    case llvm::Triple::Itanium:
+      return "windows";
+    default:
+      llvm_unreachable("unsupported Windows environment");
+    }
+  case llvm::Triple::PS4:
+    return "ps4";
+  }
+  llvm_unreachable("unsupported OS");
 }
 
 StringRef swift::getMajorArchitectureName(const llvm::Triple &Triple) {

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -158,7 +158,7 @@ bool SourceKit::CodeCompletion::addCustomCompletions(
     CodeCompletion::SwiftResult swiftResult(
         CodeCompletion::SwiftResult::ResultKind::Pattern,
         SemanticContextKind::ExpressionSpecific,
-        /*numBytesToErase=*/0, completionString);
+        /*NumBytesToErase=*/0, completionString);
 
     CompletionBuilder builder(sink, swiftResult);
     builder.setCustomKind(customCompletion.Kind);
@@ -314,8 +314,8 @@ CodeCompletionViewRef CodeCompletionOrganizer::takeResultsView() {
 //===----------------------------------------------------------------------===//
 
 ImportDepth::ImportDepth(ASTContext &context, CompilerInvocation &invocation) {
-  llvm::DenseSet<Module *> seen;
-  std::deque<std::pair<Module *, uint8_t>> worklist;
+  llvm::DenseSet<ModuleDecl *> seen;
+  std::deque<std::pair<ModuleDecl *, uint8_t>> worklist;
 
   StringRef mainModule = invocation.getModuleName();
   auto *main = context.getLoadedModule(context.getIdentifier(mainModule));
@@ -331,8 +331,8 @@ ImportDepth::ImportDepth(ASTContext &context, CompilerInvocation &invocation) {
 
   // Private imports from this module.
   // FIXME: only the private imports from the current source file.
-  SmallVector<Module::ImportedModule, 16> mainImports;
-  main->getImportedModules(mainImports, Module::ImportFilter::Private);
+  SmallVector<ModuleDecl::ImportedModule, 16> mainImports;
+  main->getImportedModules(mainImports, ModuleDecl::ImportFilter::Private);
   for (auto &import : mainImports) {
     uint8_t depth = 1;
     if (auxImports.count(import.second->getName().str()))
@@ -342,7 +342,7 @@ ImportDepth::ImportDepth(ASTContext &context, CompilerInvocation &invocation) {
 
   // Fill depths with BFS over module imports.
   while (!worklist.empty()) {
-    Module *module;
+    ModuleDecl *module;
     uint8_t depth;
     std::tie(module, depth) = worklist.front();
     worklist.pop_front();
@@ -359,7 +359,7 @@ ImportDepth::ImportDepth(ASTContext &context, CompilerInvocation &invocation) {
     }
 
     // Add imports to the worklist.
-    SmallVector<Module::ImportedModule, 16> imports;
+    SmallVector<ModuleDecl::ImportedModule, 16> imports;
     module->getImportedModules(imports);
     for (auto &import : imports) {
       uint8_t next = std::max(depth, uint8_t(depth + 1)); // unsigned wrap
@@ -439,6 +439,7 @@ static bool isHighPriorityKeyword(CodeCompletionKeywordKind kind) {
   case CodeCompletionKeywordKind::kw_if:
   case CodeCompletionKeywordKind::kw_for:
   case CodeCompletionKeywordKind::kw_while:
+  case CodeCompletionKeywordKind::kw_return:
   case CodeCompletionKeywordKind::kw_func:
     return true;
   default:
@@ -446,11 +447,32 @@ static bool isHighPriorityKeyword(CodeCompletionKeywordKind kind) {
   }
 }
 
-bool FilterRules::hideCompletion(Completion *completion) const {
+bool FilterRules::hideFilterName(StringRef name) const {
+  auto I = hideByFilterName.find(name);
+  if (I != hideByFilterName.end())
+    return I->getValue();
+  return hideAll;
+}
 
-  if (!completion->getName().empty()) {
-    auto I = hideByName.find(completion->getName());
-    if (I != hideByName.end())
+bool FilterRules::hideCompletion(Completion *completion) const {
+  return hideCompletion(completion, completion->getName(),
+                        completion->getDescription(),
+                        completion->getCustomKind());
+}
+
+bool FilterRules::hideCompletion(SwiftResult *completion, StringRef filterName,
+                                 StringRef description,
+                                 void *customKind) const {
+
+  if (!description.empty()) {
+    auto I = hideByDescription.find(description);
+    if (I != hideByDescription.end())
+      return I->getValue();
+  }
+
+  if (!filterName.empty()) {
+    auto I = hideByFilterName.find(filterName);
+    if (I != hideByFilterName.end())
       return I->getValue();
   }
 
@@ -467,7 +489,7 @@ bool FilterRules::hideCompletion(Completion *completion) const {
     break;
   }
   case Completion::Pattern: {
-    if (completion->hasCustomKind()) {
+    if (customKind) {
       // FIXME: individual custom completions
       if (hideCustomCompletions)
         return true;
@@ -739,6 +761,7 @@ static int compareHighPriorityKeywords(Item &a_, Item &b_) {
     CodeCompletionKeywordKind::kw_if,
     CodeCompletionKeywordKind::kw_for,
     CodeCompletionKeywordKind::kw_while,
+    CodeCompletionKeywordKind::kw_return,
     CodeCompletionKeywordKind::kw_func,
   };
   auto size = sizeof(order) / sizeof(order[0]);
@@ -911,7 +934,7 @@ static void sortTopN(const Options &options, Group *group,
     if (!beginNewIndex)
       return;
 
-    assert(endNewIndex > beginNewIndex && endNewIndex < contents.size());
+    assert(endNewIndex > beginNewIndex && endNewIndex <= contents.size());
 
     // Temporarily copy the first result to temporary storage.
     SmallVector<Item *, 16> firstResults;
@@ -925,6 +948,7 @@ static void sortTopN(const Options &options, Group *group,
       contents[ci] = std::unique_ptr<Item>(firstResults[i]);
     }
     unsigned topN = endNewIndex - beginNewIndex;
+    assert(topN <= options.showTopNonLiteralResults);
     for (unsigned ci = topN, i = 0; i < beginNewIndex; ++i, ++ci) {
       assert(ci < contents.size() && !contents[ci]);
       contents[ci] = std::unique_ptr<Item>(firstResults[i]);
@@ -938,7 +962,7 @@ static void sortRecursive(const Options &options, Group *group,
   auto &contents = group->contents;
   double best = -1.0;
   for (auto &item : contents) {
-    if (Group *g = dyn_cast<Group>(item.get())) {
+    if (auto *g = dyn_cast<Group>(item.get())) {
       sortRecursive(options, g, hasExpectedTypes);
     } else {
       Result *r = cast<Result>(item.get());
@@ -1033,7 +1057,7 @@ void CodeCompletionOrganizer::Impl::groupStemsRecursive(
 
   auto start = worklist.begin();
   while (start != worklist.end()) {
-    if (Group *g = dyn_cast<Group>(start->get())) {
+    if (auto *g = dyn_cast<Group>(start->get())) {
       groupStemsRecursive(g, recurseIntoNewGroups, getStem);
       newContents.push_back(std::move(*start));
       ++start;
@@ -1164,7 +1188,7 @@ void CompletionBuilder::getFilterName(CodeCompletionString *str,
     for (auto C : str->getChunks().slice(*FirstTextChunk)) {
 
       if (C.is(ChunkKind::BraceStmtWithCursor))
-        break;
+        break; // Don't include brace-stmt in filter name.
 
       if (C.is(ChunkKind::Equal)) {
         OS << C.getText();
@@ -1177,7 +1201,7 @@ void CompletionBuilder::getFilterName(CodeCompletionString *str,
       case ChunkKind::CallParameterInternalName:
       case ChunkKind::CallParameterClosureType:
       case ChunkKind::CallParameterType:
-      case ChunkKind::DeclAttrParamEqual:
+      case ChunkKind::DeclAttrParamColon:
       case ChunkKind::Comma:
       case ChunkKind::Whitespace:
       case ChunkKind::Ellipsis:
@@ -1208,8 +1232,6 @@ void CompletionBuilder::getDescription(SwiftResult *result, raw_ostream &OS,
   if (FirstTextChunk.hasValue()) {
     for (auto C : str->getChunks().slice(*FirstTextChunk)) {
       using ChunkKind = CodeCompletionString::Chunk::ChunkKind;
-      if (C.is(ChunkKind::BraceStmtWithCursor))
-        break;
 
       // FIXME: we need a more uniform way to handle operator completions.
       if (C.is(ChunkKind::Equal))
@@ -1344,7 +1366,6 @@ NameStyle::NameStyle(StringRef name)
   unsigned underscores = 0;
   unsigned caseCount[3] = {0, 0, 0};
   Case leadingCase = None;
-  Case prevCase = None;
   for (; pos < center.size(); ++pos) {
     char c = center[pos];
     Case curCase = caseOf(c);
@@ -1353,7 +1374,6 @@ NameStyle::NameStyle(StringRef name)
 
     underscores += (c == '_');
     caseCount[curCase] += 1;
-    prevCase = curCase;
   }
 
   assert(caseCount[leadingCase] > 0);

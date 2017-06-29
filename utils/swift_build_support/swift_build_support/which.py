@@ -2,11 +2,11 @@
 #
 # This source file is part of the Swift.org open source project
 #
-# Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+# Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 # Licensed under Apache License v2.0 with Runtime Library Exception
 #
-# See http://swift.org/LICENSE.txt for license information
-# See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+# See https://swift.org/LICENSE.txt for license information
+# See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 #
 # ----------------------------------------------------------------------------
 #
@@ -18,9 +18,8 @@
 
 from __future__ import absolute_import
 
-import subprocess
-
 from . import cache_util
+from . import shell
 
 
 @cache_util.cached
@@ -35,8 +34,8 @@ def which(cmd):
     We provide our own implementation because shutil.which() has not
     been backported to Python 2.7, which we support.
     """
-    try:
-        ret = subprocess.check_output(['which', cmd])
-        return str(ret.rstrip().decode())
-    except subprocess.CalledProcessError:
+    out = shell.capture(['which', cmd],
+                        dry_run=False, echo=False, optional=True)
+    if out is None:
         return None
+    return out.rstrip()

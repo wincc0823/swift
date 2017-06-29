@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -61,7 +61,7 @@ public class B {
 public class A1 {
     let b: B1
     public init(b:B1) {
-        self.b = b;
+        self.b = b
     }
     public func run1() -> Int {
         return b.f1() + b.f2() + b.f3()
@@ -155,7 +155,7 @@ public class D2 : B2 {
 
 
 public class A3 {
-    let b : B3
+    let b: B3
 
     public init(b:B3) {
         self.b = b
@@ -245,9 +245,9 @@ public class F3 : B3 {
 // on a class without any subclasses
 @inline(never)
 func test(_ a:A, _ UPTO: Int) -> Int64 {
-    var cnt : Int64 = 0
+    var cnt: Int64 = 0
     for _ in 0..<UPTO {
-        cnt += a.run2()
+        cnt += Int64(a.run2())
     }
     return cnt
 }
@@ -256,9 +256,9 @@ func test(_ a:A, _ UPTO: Int) -> Int64 {
 // on a class with 1 subclass
 @inline(never)
 func test(_ a:A1, _ UPTO: Int) -> Int64 {
-    var cnt : Int64 = 0
+    var cnt: Int64 = 0
     for _ in 0..<UPTO {
-        cnt += a.run2()
+        cnt += Int64(a.run2())
     }
     return cnt
 }
@@ -267,9 +267,9 @@ func test(_ a:A1, _ UPTO: Int) -> Int64 {
 // on a class with 2 subclasses
 @inline(never)
 func test(_ a:A2, _ UPTO: Int) -> Int64 {
-    var cnt : Int64 = 0
+    var cnt: Int64 = 0
     for _ in 0..<UPTO {
-        cnt += a.run2()
+        cnt += Int64(a.run2())
     }
     return cnt
 }
@@ -279,10 +279,10 @@ func test(_ a:A2, _ UPTO: Int) -> Int64 {
 // of different subclasses
 @inline(never)
 func test(_ a2_c2:A2, _ a2_d2:A2,  _ UPTO: Int) -> Int64 {
-    var cnt : Int64 = 0
+    var cnt: Int64 = 0
     for _ in 0..<UPTO/2 {
-        cnt += a2_c2.run2()
-        cnt += a2_d2.run2()
+        cnt += Int64(a2_c2.run2())
+        cnt += Int64(a2_d2.run2())
     }
     return cnt
 }
@@ -292,12 +292,12 @@ func test(_ a2_c2:A2, _ a2_d2:A2,  _ UPTO: Int) -> Int64 {
 // of different subclasses
 @inline(never)
 func test(_ a3_c3: A3, _ a3_d3: A3, _ a3_e3: A3, _ a3_f3: A3, _ UPTO: Int) -> Int64 {
-    var cnt : Int64  = 0
+    var cnt: Int64  = 0
     for _ in 0..<UPTO/4 {
-        cnt += a3_c3.run2()
-        cnt += a3_d3.run2()
-        cnt += a3_e3.run2()
-        cnt += a3_f3.run2()
+        cnt += Int64(a3_c3.run2())
+        cnt += Int64(a3_d3.run2())
+        cnt += Int64(a3_e3.run2())
+        cnt += Int64(a3_f3.run2())
     }
     return cnt
 }

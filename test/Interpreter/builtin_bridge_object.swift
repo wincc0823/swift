@@ -1,6 +1,6 @@
-// RUN: rm -rf %t  &&  mkdir -p %t
+// RUN: %empty-directory(%t)
 // RUN: %target-build-swift -parse-stdlib %s -o %t/a.out
-// RUN: %target-run %t/a.out | FileCheck %s
+// RUN: %target-run %t/a.out | %FileCheck %s
 // REQUIRES: executable_test
 
 // FIXME: rdar://problem/19648117 Needs splitting objc parts out
@@ -32,6 +32,12 @@ let NATIVE_SPARE_BITS: UInt = 0x7F00_0000_0000_0007
 let OBJC_TAGGED_POINTER_BITS: UInt = 0x8000_0000_0000_0000
 
 #elseif arch(powerpc64) || arch(powerpc64le)
+
+// We have no ObjC tagged pointers, and three low spare bits due to alignment.
+let NATIVE_SPARE_BITS: UInt = 0x0000_0000_0000_0007
+let OBJC_TAGGED_POINTER_BITS: UInt = 0
+
+#elseif arch(s390x)
 
 // We have no ObjC tagged pointers, and three low spare bits due to alignment.
 let NATIVE_SPARE_BITS: UInt = 0x0000_0000_0000_0007
@@ -173,10 +179,10 @@ func hitOptionalSpecifically(_ x: Builtin.BridgeObject?) {
 
 if true {
   // CHECK-NEXT: true
-  print(sizeof(Optional<Builtin.BridgeObject>.self)
-            == sizeof(Builtin.BridgeObject.self))
+  print(MemoryLayout<Optional<Builtin.BridgeObject>>.size
+            == MemoryLayout<Builtin.BridgeObject>.size)
 
-  var bo: Builtin.BridgeObject? = nil
+  var bo: Builtin.BridgeObject?
 
   // CHECK-NEXT: none
   hitOptionalSpecifically(bo)

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -23,8 +23,7 @@ public func run_DictionarySwap(_ N: Int) {
     for i in 1...size {
         dict[i] = i
     }
-    CheckResults(dict.count == size,
-                 "Incorrect dict count: \(dict.count) != \(size).")
+    CheckResults(dict.count == size)
 
     var swapped = false
     for _ in 1...10000*N {
@@ -35,8 +34,7 @@ public func run_DictionarySwap(_ N: Int) {
         }
     }
 
-    CheckResults(swappedCorrectly(swapped, dict[25]!, dict[75]!),
-                 "Dictionary value swap failed")
+    CheckResults(swappedCorrectly(swapped, dict[25]!, dict[75]!))
 }
 
 // Return true if correctly swapped, false otherwise
@@ -45,23 +43,20 @@ func swappedCorrectly(_ swapped: Bool, _ p25: Int, _ p75: Int) -> Bool {
           !swapped && (p25 == 25 && p75 == 75)
 }
 
-class Box<T : Hashable where T : Equatable> : Hashable {
+class Box<T : Hashable> : Hashable {
   var value: T
 
   init(_ v: T) {
     value = v
   }
 
-  var hashValue : Int {
+  var hashValue: Int {
     return value.hashValue
   }
-}
 
-extension Box : Equatable {
-}
-
-func ==<T: Equatable>(lhs: Box<T>, rhs: Box<T>) -> Bool {
-  return lhs.value == rhs.value
+  static func ==(lhs: Box, rhs: Box) -> Bool {
+    return lhs.value == rhs.value
+  }
 }
 
 @inline(never)
@@ -73,8 +68,7 @@ public func run_DictionarySwapOfObjects(_ N: Int) {
     for i in 1...size {
         dict[Box(i)] = Box(i)
     }
-    CheckResults(dict.count == size,
-                 "Incorrect dict count: \(dict.count) != \(size).")
+    CheckResults(dict.count == size)
 
     var swapped = false
     for _ in 1...10000*N {
@@ -85,6 +79,5 @@ public func run_DictionarySwapOfObjects(_ N: Int) {
         }
     }
 
-    CheckResults(swappedCorrectly(swapped, dict[Box(25)]!.value, dict[Box(75)]!.value),
-                 "Dictionary value swap failed")
+    CheckResults(swappedCorrectly(swapped, dict[Box(25)]!.value, dict[Box(75)]!.value))
 }

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,13 +14,16 @@
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/DiagnosticEngine.h"
+#include "swift/AST/DiagnosticsSema.h"
 #include "swift/AST/DiagnosticsSIL.h"
 #include "swift/AST/Expr.h"
+#include "swift/AST/Stmt.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILLocation.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/SILVisitor.h"
+
 using namespace swift;
 
 template<typename...T, typename...U>
@@ -39,28 +42,22 @@ static void diagnoseMissingReturn(const UnreachableInst *UI,
   Type ResTy;
 
   if (auto *FD = FLoc.getAsASTNode<FuncDecl>()) {
-    ResTy = FD->getResultType();
+    ResTy = FD->getResultInterfaceType();
   } else if (auto *CE = FLoc.getAsASTNode<ClosureExpr>()) {
     ResTy = CE->getResultType();
   } else {
     llvm_unreachable("unhandled case in MissingReturn");
   }
 
-  bool isNoReturn = F->getLoweredFunctionType()->isNoReturn();
-
-  // No action required if the function returns 'Void' or that the
-  // function is marked 'noreturn'.
-  if (ResTy->isVoid() || isNoReturn)
-    return;
-
   SILLocation L = UI->getLoc();
   assert(L && ResTy);
+  auto diagID = F->isNoReturnFunction() ? diag::missing_never_call
+                                        : diag::missing_return;
   diagnose(Context,
            L.getEndSourceLoc(),
-           diag::missing_return, ResTy,
+           diagID, ResTy,
            FLoc.isASTNode<ClosureExpr>() ? 1 : 0);
 }
-
 
 static void diagnoseUnreachable(const SILInstruction *I,
                                 ASTContext &Context) {
@@ -86,35 +83,11 @@ static void diagnoseUnreachable(const SILInstruction *I,
       return;
     }
 
-    // A non-exhaustive switch would also produce an unreachable instruction.
-    if (L.isASTNode<SwitchStmt>()) {
-      diagnose(Context, L.getEndSourceLoc(), diag::non_exhaustive_switch);
-      return;
-    }
-
     if (auto *Guard = L.getAsASTNode<GuardStmt>()) {
       diagnose(Context, Guard->getBody()->getEndLoc(),
                diag::guard_body_must_not_fallthrough);
       return;
     }
-  }
-}
-
-static void diagnoseReturn(const SILInstruction *I, ASTContext &Context) {
-  auto *TI = dyn_cast<TermInst>(I);
-  if (!TI || !(isa<BranchInst>(TI) || isa<ReturnInst>(TI)))
-    return;
-
-  const SILBasicBlock *BB = TI->getParent();
-  const SILFunction *F = BB->getParent();
-
-  // Warn if we reach a return inside a noreturn function.
-  if (F->getLoweredFunctionType()->isNoReturn()) {
-    SILLocation L = TI->getLoc();
-    if (L.is<ReturnLocation>())
-      diagnose(Context, L.getSourceLoc(), diag::return_from_noreturn);
-    if (L.is<ImplicitReturnLocation>())
-      diagnose(Context, L.getSourceLoc(), diag::return_from_noreturn);
   }
 }
 
@@ -129,7 +102,7 @@ static void diagnoseStaticReports(const SILInstruction *I,
 
       // Report diagnostic if the first argument has been folded to '1'.
       OperandValueArrayRef Args = BI->getArguments();
-      IntegerLiteralInst *V = dyn_cast<IntegerLiteralInst>(Args[0]);
+      auto *V = dyn_cast<IntegerLiteralInst>(Args[0]);
       if (!V || V->getValue() != 1)
         return;
 
@@ -141,9 +114,7 @@ static void diagnoseStaticReports(const SILInstruction *I,
 
 namespace {
 class EmitDFDiagnostics : public SILFunctionTransform {
-  virtual ~EmitDFDiagnostics() {}
-
-  StringRef getName() override { return "Emit Dataflow Diagnostics"; }
+  ~EmitDFDiagnostics() override {}
 
   /// The entry point to the transformation.
   void run() override {
@@ -151,7 +122,6 @@ class EmitDFDiagnostics : public SILFunctionTransform {
     for (auto &BB : *getFunction())
       for (auto &I : BB) {
         diagnoseUnreachable(&I, M.getASTContext());
-        diagnoseReturn(&I, M.getASTContext());
         diagnoseStaticReports(&I, M);
       }
   }

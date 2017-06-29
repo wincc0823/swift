@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -81,7 +81,7 @@ namespace {
       return { S->getStartLoc(), S->getEndLoc() };
     }
   };
-}
+} // end anonymous namespace
 
 template <class T> static SourceRange getSourceRangeImpl(const T *S) {
   static_assert(isOverriddenFromStmt(&T::getSourceRange) ||
@@ -153,7 +153,9 @@ SourceLoc ReturnStmt::getStartLoc() const {
   return ReturnLoc;
 }
 SourceLoc ReturnStmt::getEndLoc() const {
-  return (Result ? Result->getEndLoc() : ReturnLoc);
+  if (Result && Result->getEndLoc().isValid())
+    return Result->getEndLoc();
+  return ReturnLoc;
 }
 
 SourceLoc ThrowStmt::getEndLoc() const { return SubExpr->getEndLoc(); }
@@ -282,24 +284,14 @@ SourceLoc PoundAvailableInfo::getEndLoc() const {
 }
 
 void PoundAvailableInfo::
-getPlatformKeywordRanges(SmallVectorImpl<CharSourceRange> &PlatformRanges) {
+getPlatformKeywordLocs(SmallVectorImpl<SourceLoc> &PlatformLocs) {
   for (unsigned i = 0; i < NumQueries; i++) {
     auto *VersionSpec =
-      dyn_cast<VersionConstraintAvailabilitySpec>(getQueries()[i]);
+      dyn_cast<PlatformVersionConstraintAvailabilitySpec>(getQueries()[i]);
     if (!VersionSpec)
       continue;
     
-    auto Loc = VersionSpec->getPlatformLoc();
-    auto Platform = VersionSpec->getPlatform();
-    switch (Platform) {
-    case PlatformKind::none:
-      break;
-#define AVAILABILITY_PLATFORM(X, PrettyName)                          \
-  case PlatformKind::X:                                               \
-    PlatformRanges.push_back(CharSourceRange(Loc, strlen(#X)));       \
-    break;
-#include "swift/AST/PlatformKinds.def"
-    }
+    PlatformLocs.push_back(VersionSpec->getPlatformLoc());
   }
 }
 
@@ -317,9 +309,16 @@ SourceRange StmtConditionElement::getSourceRange() const {
       Start = IntroducerLoc;
     else
       Start = getPattern()->getStartLoc();
-
-    return SourceRange(Start, getInitializer()->getEndLoc());
+    
+    SourceLoc End = getInitializer()->getEndLoc();
+    if (Start.isValid() && End.isValid()) {
+      return SourceRange(Start, End);
+    } else {
+      return SourceRange();
+    }
   }
+
+  llvm_unreachable("Unhandled StmtConditionElement in switch.");
 }
 
 SourceLoc StmtConditionElement::getStartLoc() const {
@@ -329,10 +328,10 @@ SourceLoc StmtConditionElement::getStartLoc() const {
   case StmtConditionElement::CK_Availability:
     return getAvailability()->getStartLoc();
   case StmtConditionElement::CK_PatternBinding:
-    if (IntroducerLoc.isValid())
-      return IntroducerLoc;
-    return getPattern()->getStartLoc();
+    return getSourceRange().Start;
   }
+
+  llvm_unreachable("Unhandled StmtConditionElement in switch.");
 }
 
 SourceLoc StmtConditionElement::getEndLoc() const {
@@ -342,8 +341,10 @@ SourceLoc StmtConditionElement::getEndLoc() const {
   case StmtConditionElement::CK_Availability:
     return getAvailability()->getEndLoc();
   case StmtConditionElement::CK_PatternBinding:
-    return getInitializer()->getEndLoc();
+    return getSourceRange().End;
   }
+
+  llvm_unreachable("Unhandled StmtConditionElement in switch.");
 }
 
 static StmtCondition exprToCond(Expr *C, ASTContext &Ctx) {
@@ -411,15 +412,22 @@ CaseStmt *CaseStmt::create(ASTContext &C, SourceLoc CaseLoc,
 SwitchStmt *SwitchStmt::create(LabeledStmtInfo LabelInfo, SourceLoc SwitchLoc,
                                Expr *SubjectExpr,
                                SourceLoc LBraceLoc,
-                               ArrayRef<CaseStmt *> Cases,
+                               ArrayRef<ASTNode> Cases,
                                SourceLoc RBraceLoc,
                                ASTContext &C) {
-  void *p = C.Allocate(totalSizeToAlloc<CaseStmt *>(Cases.size()),
+#ifndef NDEBUG
+  for (auto N : Cases)
+    assert((N.is<Stmt*>() && isa<CaseStmt>(N.get<Stmt*>())) ||
+           (N.is<Decl*>() && isa<IfConfigDecl>(N.get<Decl*>())));
+#endif
+
+  void *p = C.Allocate(totalSizeToAlloc<ASTNode>(Cases.size()),
                        alignof(SwitchStmt));
   SwitchStmt *theSwitch = ::new (p) SwitchStmt(LabelInfo, SwitchLoc,
                                                SubjectExpr, LBraceLoc,
                                                Cases.size(), RBraceLoc);
+
   std::uninitialized_copy(Cases.begin(), Cases.end(),
-                          theSwitch->getTrailingObjects<CaseStmt *>());
+                          theSwitch->getTrailingObjects<ASTNode>());
   return theSwitch;
 }

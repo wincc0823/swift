@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -145,37 +145,31 @@ struct _UnicodeGraphemeClusterBreakPropertyTrie {
   }
 
   @_transparent
-  @warn_unused_result
   func _getBMPFirstLevelIndex(_ cp: UInt32) -> Int {
     return Int(cp >> ${BMPFirstLevelIndexBits})
   }
 
   @_transparent
-  @warn_unused_result
   func _getBMPDataOffset(_ cp: UInt32) -> Int {
     return Int(cp & ((1 << ${BMPDataOffsetBits}) - 1))
   }
 
   @_transparent
-  @warn_unused_result
   func _getSuppFirstLevelIndex(_ cp: UInt32) -> Int {
     return Int(cp >> (${SuppSecondLevelIndexBits} + ${SuppDataOffsetBits}))
   }
 
   @_transparent
-  @warn_unused_result
   func _getSuppSecondLevelIndex(_ cp: UInt32) -> Int {
     return Int((cp >> ${SuppDataOffsetBits}) &
         ((1 << ${SuppSecondLevelIndexBits}) - 1))
   }
 
   @_transparent
-  @warn_unused_result
   func _getSuppDataOffset(_ cp: UInt32) -> Int {
     return Int(cp & ((1 << ${SuppDataOffsetBits}) - 1))
   }
 
-  @warn_unused_result
   func getPropertyRawValue(
       _ codePoint: UInt32
   ) -> _GraphemeClusterBreakPropertyRawValue {
@@ -204,7 +198,6 @@ struct _UnicodeGraphemeClusterBreakPropertyTrie {
     }
   }
 
-  @warn_unused_result
   public // @testable
   func getPropertyValue(
       _ codePoint: UInt32
@@ -213,6 +206,9 @@ struct _UnicodeGraphemeClusterBreakPropertyTrie {
   }
 }
 
+// FIXME(ABI)#74 : don't mark this type versioned, or any of its APIs inlineable.
+// Grapheme cluster segmentation uses a completely different algorithm in
+// Unicode 9.0.
 internal struct _UnicodeExtendedGraphemeClusterSegmenter {
   let _noBoundaryRulesMatrix: UnsafePointer<UInt16>
 
@@ -223,7 +219,6 @@ internal struct _UnicodeExtendedGraphemeClusterSegmenter {
 
   /// Returns `true` if there is always a grapheme cluster break after a code
   /// point with a given `Grapheme_Cluster_Break` property value.
-  @warn_unused_result
   func isBoundaryAfter(_ gcb: _GraphemeClusterBreakPropertyRawValue) -> Bool {
     let ruleRow = _noBoundaryRulesMatrix[Int(gcb.rawValue)]
     return ruleRow == 0
@@ -231,7 +226,6 @@ internal struct _UnicodeExtendedGraphemeClusterSegmenter {
 
   /// Returns `true` if there is a grapheme cluster break between code points
   /// with given `Grapheme_Cluster_Break` property values.
-  @warn_unused_result
   func isBoundary(
       _ gcb1: _GraphemeClusterBreakPropertyRawValue,
       _ gcb2: _GraphemeClusterBreakPropertyRawValue

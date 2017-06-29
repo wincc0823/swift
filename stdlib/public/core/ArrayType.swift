@@ -2,18 +2,18 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
-public // @testable
-protocol _ArrayProtocol
+@_versioned
+internal protocol _ArrayProtocol
   : RangeReplaceableCollection,
-    ArrayLiteralConvertible
+    ExpressibleByArrayLiteral
 {
   //===--- public interface -----------------------------------------------===//
   /// The number of elements the Array stores.
@@ -32,7 +32,7 @@ protocol _ArrayProtocol
   /// element. Otherwise, `nil`.
   var _baseAddressIfContiguous: UnsafeMutablePointer<Element>? { get }
 
-  subscript(index: Int) -> Iterator.Element { get set }
+  subscript(index: Int) -> Element { get set }
 
   //===--- basic mutations ------------------------------------------------===//
 
@@ -44,11 +44,6 @@ protocol _ArrayProtocol
   /// - Complexity: O(`self.count`).
   mutating func reserveCapacity(_ minimumCapacity: Int)
 
-  /// Operator form of `append(contentsOf:)`.
-  func += <
-    S : Sequence where S.Iterator.Element == Iterator.Element
-  >(lhs: inout Self, rhs: S)
-
   /// Insert `newElement` at index `i`.
   ///
   /// Invalidates all indices with respect to `self`.
@@ -56,17 +51,17 @@ protocol _ArrayProtocol
   /// - Complexity: O(`self.count`).
   ///
   /// - Precondition: `startIndex <= i`, `i <= endIndex`.
-  mutating func insert(_ newElement: Iterator.Element, at i: Int)
+  mutating func insert(_ newElement: Element, at i: Int)
 
   /// Remove and return the element at the given index.
   ///
   /// - returns: The removed element.
   ///
-  /// - Complexity: Worst case O(N).
+  /// - Complexity: Worst case O(*n*).
   ///
   /// - Precondition: `count > index`.
   @discardableResult
-  mutating func remove(at index: Int) -> Iterator.Element
+  mutating func remove(at index: Int) -> Element
 
   //===--- implementation detail  -----------------------------------------===//
 
@@ -75,4 +70,16 @@ protocol _ArrayProtocol
 
   // For testing.
   var _buffer: _Buffer { get }
+}
+
+extension _ArrayProtocol {
+  // Since RangeReplaceableCollection now has a version of filter that is less
+  // efficient, we should make the default implementation coming from Sequence
+  // preferred.
+  @_inlineable
+  public func filter(
+    _ isIncluded: (Element) throws -> Bool
+  ) rethrows -> [Element] {
+    return try _filter(isIncluded)
+  }
 }

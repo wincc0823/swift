@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,6 +20,8 @@
 #include "swift/AST/Decl.h"
 #include "swift/AST/IRGenOptions.h"
 #include "swift/AST/Pattern.h"
+#include "swift/AST/SubstitutionMap.h"
+#include "swift/IRGen/Linking.h"
 #include "swift/SIL/SILModule.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
@@ -33,7 +35,6 @@
 #include "GenType.h"
 #include "IRGenFunction.h"
 #include "IRGenModule.h"
-#include "Linking.h"
 #include "IndirectTypeInfo.h"
 #include "MemberAccessStrategy.h"
 #include "NonFixedTypeInfo.h"
@@ -183,6 +184,11 @@ namespace {
         return asImpl().getNonFixedFieldAccessStrategy(IGM, T, fieldInfo);
       }
       llvm_unreachable("bad field layout kind");
+    }
+
+    unsigned getFieldIndex(IRGenModule &IGM, VarDecl *field) const {
+      auto &fieldInfo = getFieldInfo(field);
+      return fieldInfo.getStructIndex();
     }
 
     // For now, just use extra inhabitants from the first field.
@@ -407,7 +413,7 @@ namespace {
       assert(TheStruct.getStructOrBoundGenericStruct());
     }
     
-    llvm::Value *getOffsetForIndex(IRGenFunction &IGF, unsigned index) {
+    llvm::Value *getOffsetForIndex(IRGenFunction &IGF, unsigned index) override {
       // Get the field offset vector from the struct metadata.
       llvm::Value *metadata = IGF.emitTypeMetadataRefForLayout(TheStruct);
       Address fieldVector = emitAddressOfFieldOffsetVector(IGF,
@@ -579,7 +585,6 @@ class ClangRecordLowering {
   const clang::ASTContext &ClangContext;
   const clang::ASTRecordLayout &ClangLayout;
   const Size TotalStride;
-  Size TotalSize;
   const Alignment TotalAlignment;
   SpareBitVector SpareBits;
 
@@ -595,9 +600,8 @@ public:
       ClangDecl(clangDecl), ClangContext(clangDecl->getASTContext()),
       ClangLayout(ClangContext.getASTRecordLayout(clangDecl)),
       TotalStride(Size(ClangLayout.getSize().getQuantity())),
-      TotalSize(TotalStride),
       TotalAlignment(Alignment(ClangLayout.getAlignment().getQuantity())) {
-    SpareBits.reserve(TotalSize.getValue() * 8);
+    SpareBits.reserve(TotalStride.getValue() * 8);
   }
 
   void collectRecordFields() {
@@ -606,17 +610,12 @@ public:
     } else {
       collectStructFields();
     }
-
-    // Lots of layout will get screwed up if our structure claims more
-    // storage than we allocated to it.
-    assert(NextOffset == TotalSize && NextOffset <= TotalStride);
-    assert(TotalSize.roundUpToAlignment(TotalAlignment) == TotalStride);
   }
 
   const TypeInfo *createTypeInfo(llvm::StructType *llvmType) {
     llvmType->setBody(LLVMFields, /*packed*/ true);
     return ClangRecordTypeInfo::create(FieldInfos, NextExplosionIndex,
-                                       llvmType, TotalSize,
+                                       llvmType, TotalStride,
                                        std::move(SpareBits), TotalAlignment,
                                        ClangDecl);
   }
@@ -624,7 +623,7 @@ public:
 private:
   /// Collect all the fields of a union.
   void collectUnionFields() {
-    addOpaqueField(Size(0), TotalSize);
+    addOpaqueField(Size(0), TotalStride);
   }
 
   static bool isImportOfClangField(VarDecl *swiftField,
@@ -689,8 +688,14 @@ private:
 
     assert(sfi == sfe && "more Swift fields than there were Clang fields?");
 
-    // Treat this as the end of the value size.
-    TotalSize = NextOffset;
+    // We never take advantage of tail padding, because that would prevent
+    // us from passing the address of the object off to C, which is a pretty
+    // likely scenario for imported C types.
+    assert(NextOffset <= TotalStride);
+    assert(SpareBits.size() <= TotalStride.getValueInBits());
+    if (NextOffset < TotalStride) {
+      addPaddingField(TotalStride);
+    }
   }
 
   /// Place the next struct field at its appropriate offset.
@@ -778,7 +783,7 @@ private:
   }
 };
 
-}  // end anonymous namespace.
+} // end anonymous namespace
 
 /// A convenient macro for delegating an operation to all of the
 /// various struct implementations.
@@ -821,16 +826,64 @@ llvm::Constant *irgen::emitPhysicalStructMemberFixedOffset(IRGenModule &IGM,
   FOR_STRUCT_IMPL(IGM, baseType, getConstantFieldOffset, field);
 }
 
+llvm::Constant *
+irgen::emitPhysicalStructMemberOffsetOfFieldOffset(IRGenModule &IGM,
+                                                   SILType baseType,
+                                                   VarDecl *field) {
+  class FieldScanner : public StructMetadataScanner<FieldScanner> {
+    VarDecl *Field;
+  public:
+    FieldScanner(IRGenModule &IGM, StructDecl *Target, VarDecl *Field)
+      : StructMetadataScanner(IGM, Target), Field(Field)
+    {}
+    
+    Size OffsetOfFieldOffset = Size::invalid();
+    
+    void noteAddressPoint() {
+      assert(OffsetOfFieldOffset == Size::invalid()
+             && "found field offset before address point?");
+      NextOffset = Size(0);
+    }
+    
+    void addFieldOffset(VarDecl *theField) {
+      if (Field == theField)
+        OffsetOfFieldOffset = NextOffset;
+      StructMetadataScanner::addFieldOffset(theField);
+    }
+  };
+  FieldScanner scanner(IGM, baseType.getStructOrBoundGenericStruct(),
+                       field);
+  scanner.layout();
+  if (scanner.OffsetOfFieldOffset == Size::invalid())
+    return nullptr;
+  
+  return llvm::ConstantInt::get(IGM.SizeTy,
+                                scanner.OffsetOfFieldOffset.getValue());
+}
+
 MemberAccessStrategy
 irgen::getPhysicalStructMemberAccessStrategy(IRGenModule &IGM,
                                              SILType baseType, VarDecl *field) {
   FOR_STRUCT_IMPL(IGM, baseType, getFieldAccessStrategy, baseType, field);
 }
 
+unsigned irgen::getPhysicalStructFieldIndex(IRGenModule &IGM, SILType baseType,
+                                            VarDecl *field) {
+  FOR_STRUCT_IMPL(IGM, baseType, getFieldIndex, field);
+}
+
 void IRGenModule::emitStructDecl(StructDecl *st) {
-  emitStructMetadata(*this, st);
+  if (!IRGen.tryEnableLazyTypeMetadata(st))
+    emitStructMetadata(*this, st);
+
   emitNestedTypeDecls(st->getMembers());
-  emitReflectionMetadata(st);
+
+  if (shouldEmitOpaqueTypeMetadataRecord(st)) {
+    emitOpaqueTypeMetadataRecord(st);
+    return;
+  }
+
+  emitFieldMetadataRecord(st);
 }
 
 namespace {
@@ -846,7 +899,7 @@ namespace {
       setSubclassKind((unsigned) StructTypeInfoKind::ResilientStructTypeInfo);
     }
   };
-}
+} // end anonymous namespace
 
 const TypeInfo *TypeConverter::convertResilientStruct() {
   llvm::Type *storageType = IGM.OpaquePtrTy->getElementType();

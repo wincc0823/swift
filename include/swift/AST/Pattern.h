@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -20,16 +20,18 @@
 #include "swift/Basic/SourceLoc.h"
 #include "swift/Basic/type_traits.h"
 #include "swift/AST/Decl.h"
-#include "swift/AST/Expr.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/AST/Type.h"
 #include "swift/AST/Types.h"
 #include "swift/AST/TypeLoc.h"
+#include "swift/AST/TypeAlignments.h"
 #include "swift/Basic/OptionSet.h"
 #include "llvm/Support/TrailingObjects.h"
 
 namespace swift {
   class ASTContext;
+  class Expr;
+  enum class CheckedCastKind : unsigned;
 
 /// PatternKind - The classification of different kinds of
 /// value-matching pattern.
@@ -47,8 +49,9 @@ class alignas(8) Pattern {
     friend class Pattern;
     unsigned Kind : 8;
     unsigned isImplicit : 1;
+    mutable unsigned hasInterfaceType : 1;
   };
-  enum { NumPatternBits = 9 };
+  enum { NumPatternBits = 10 };
   enum { NumBitsAllocated = 32 };
 
   class TuplePatternBitfields {
@@ -73,11 +76,16 @@ protected:
   Pattern(PatternKind kind) {
     PatternBits.Kind = unsigned(kind);
     PatternBits.isImplicit = false;
+    PatternBits.hasInterfaceType = false;
   }
 
 private:
   /// The checked type of the pattern.
-  Type Ty;
+  ///
+  /// if \c PatternBits.hasInterfaceType, this stores the interface type of the
+  /// pattern, which will be lazily resolved to the contextual type using
+  /// the environment in \c ASTContext::DelayedPatternContexts.
+  mutable Type Ty;
 
 public:
   PatternKind getKind() const { return PatternKind(PatternBits.Kind); }
@@ -108,11 +116,25 @@ public:
 
   /// If this pattern has been type-checked, return the type it
   /// matches.
-  Type getType() const { assert(hasType()); return Ty; }
+  Type getType() const;
 
   /// Set the type of this pattern, given that it was previously not
   /// type-checked.
   void setType(Type ty) { Ty = ty; }
+
+  /// Retrieve the delayed interface type of this pattern, if it has one.
+  ///
+  /// Note: this is used for delayed deserialization logic.
+  Type getDelayedInterfaceType() const {
+    if (PatternBits.hasInterfaceType) return Ty;
+    return nullptr;
+  }
+
+  /// Set the type of this pattern as an interface type whose resolution to
+  /// a context type will be performed lazily.
+  ///
+  /// \param dc The context in which the type will be resolved.
+  void setDelayedInterfaceType(Type interfaceTy, DeclContext *dc);
 
   /// Overwrite the type of this pattern.
   void overwriteType(Type ty) { assert(hasType()); Ty = ty; }
@@ -351,7 +373,7 @@ public:
 /// dynamic type match.
 class TypedPattern : public Pattern {
   Pattern *SubPattern;
-  TypeLoc PatType;
+  mutable TypeLoc PatType;
 
 public:
   TypedPattern(Pattern *pattern, TypeLoc tl, Optional<bool> implicit = None)
@@ -380,8 +402,20 @@ public:
   const Pattern *getSubPattern() const { return SubPattern; }
   void setSubPattern(Pattern *p) { SubPattern = p; }
 
-  TypeLoc &getTypeLoc() { return PatType; }
-  TypeLoc getTypeLoc() const { return PatType; }
+  TypeLoc &getTypeLoc() {
+    // If we have a delayed interface type, set our type from that.
+    if (getDelayedInterfaceType())
+      PatType.setType(getType());
+
+    return PatType;
+  }
+  TypeLoc getTypeLoc() const {
+    // If we have a delayed interface type, set our type from that.
+    if (getDelayedInterfaceType())
+      PatType.setType(getType());
+
+    return PatType;
+  }
 
   SourceLoc getLoc() const {
     if (SubPattern->isImplicit())
@@ -415,7 +449,7 @@ class IsPattern : public Pattern {
 public:
   IsPattern(SourceLoc IsLoc, TypeLoc CastTy,
              Pattern *SubPattern,
-             CheckedCastKind Kind = CheckedCastKind::Unresolved,
+             CheckedCastKind Kind,
              Optional<bool> implicit = None)
     : Pattern(PatternKind::Is),
       IsLoc(IsLoc),
@@ -451,102 +485,6 @@ public:
     return P->getKind() == PatternKind::Is;
   }
 };
-
-namespace detail {
-  /// A nominal type subpattern record.
-  class NominalTypePatternElement {
-    /// The location of the property name.
-    SourceLoc PropertyLoc;
-    /// The location of the colon.
-    SourceLoc ColonLoc;
-    /// The referenced property name.
-    Identifier PropertyName;
-    /// The referenced property.
-    VarDecl *Property;
-    /// The subpattern.
-    Pattern *SubPattern;
-  public:
-    NominalTypePatternElement(SourceLoc PropLoc, Identifier PropName,
-                              VarDecl *Prop, SourceLoc ColonLoc, Pattern *SubP)
-      : PropertyLoc(PropLoc), ColonLoc(ColonLoc),
-        PropertyName(PropName), Property(Prop),
-        SubPattern(SubP)
-    {}
-    
-    SourceLoc getPropertyLoc() const { return PropertyLoc; }
-    SourceLoc getColonLoc() const { return ColonLoc; }
-    
-    VarDecl *getProperty() const { return Property; }
-    void setProperty(VarDecl *v) { Property = v; }
-    
-    Identifier getPropertyName() const { return PropertyName; }
-    
-    const Pattern *getSubPattern() const { return SubPattern; }
-    Pattern *getSubPattern() { return SubPattern; }
-    void setSubPattern(Pattern *p) { SubPattern = p; }
-  };
-} // end namespace detail
-  
-/// A pattern that matches a nominal type and destructures elements out of it.
-/// The match succeeds if the loaded property values all match their associated
-/// subpatterns.
-class NominalTypePattern final : public Pattern,
-    private llvm::TrailingObjects<NominalTypePattern,
-                                  detail::NominalTypePatternElement> {
-  friend TrailingObjects;
-
-public:
-  /// A nominal type subpattern record.
-  using Element = detail::NominalTypePatternElement;
-
-private:
-  TypeLoc CastType;
-  SourceLoc LParenLoc, RParenLoc;
-  
-  unsigned NumElements;
-
-  NominalTypePattern(TypeLoc CastTy, SourceLoc LParenLoc,
-                     ArrayRef<Element> Elements,
-                     SourceLoc RParenLoc,
-                     Optional<bool> implicit = None)
-    : Pattern(PatternKind::NominalType), CastType(CastTy),
-      LParenLoc(LParenLoc), RParenLoc(RParenLoc),
-      NumElements(Elements.size())
-  {
-    if (implicit.hasValue() ? *implicit : !CastTy.hasLocation())
-      setImplicit();
-    std::uninitialized_copy(Elements.begin(), Elements.end(),
-                            getTrailingObjects<Element>());
-  }
-  
-public:
-  static NominalTypePattern *create(TypeLoc CastTy, SourceLoc LParenLoc,
-                                    ArrayRef<Element> Elements,
-                                    SourceLoc RParenLoc,
-                                    ASTContext &C,
-                                    Optional<bool> implicit = None);
-
-  TypeLoc &getCastTypeLoc() { return CastType; }
-  TypeLoc getCastTypeLoc() const { return CastType; }
-  
-  ArrayRef<Element> getElements() const {
-    return {getTrailingObjects<Element>(), NumElements};
-  }
-  MutableArrayRef<Element> getMutableElements() {
-    return {getTrailingObjects<Element>(), NumElements};
-  }
-  
-  SourceLoc getLoc() const { return CastType.getSourceRange().Start; }
-  SourceLoc getLParenLoc() const { return LParenLoc; }
-  SourceLoc getRParenLoc() const { return RParenLoc; }
-  SourceRange getSourceRange() const {
-    return {getLoc(), RParenLoc};
-  }
-  
-  static bool classof(const Pattern *P) {
-    return P->getKind() == PatternKind::NominalType;
-  }
-};
   
 /// A pattern that matches an enum case. If the enum value is in the matching
 /// case, then the value is extracted. If there is a subpattern, it is then
@@ -556,7 +494,7 @@ class EnumElementPattern : public Pattern {
   SourceLoc DotLoc;
   SourceLoc NameLoc;
   Identifier Name;
-  EnumElementDecl *ElementDecl;
+  PointerUnion<EnumElementDecl *, Expr*> ElementDeclOrUnresolvedOriginalExpr;
   Pattern /*nullable*/ *SubPattern;
   
 public:
@@ -565,9 +503,24 @@ public:
                      Pattern *SubPattern, Optional<bool> Implicit = None)
     : Pattern(PatternKind::EnumElement),
       ParentType(ParentType), DotLoc(DotLoc), NameLoc(NameLoc), Name(Name),
-      ElementDecl(Element), SubPattern(SubPattern) {
+      ElementDeclOrUnresolvedOriginalExpr(Element),
+      SubPattern(SubPattern) {
     if (Implicit.hasValue() && *Implicit)
       setImplicit();
+  }
+  
+  /// Create an unresolved EnumElementPattern for a `.foo` pattern relying on
+  /// contextual type.
+  EnumElementPattern(SourceLoc DotLoc,
+                     SourceLoc NameLoc,
+                     Identifier Name,
+                     Pattern *SubPattern,
+                     Expr *UnresolvedOriginalExpr)
+    : Pattern(PatternKind::EnumElement),
+      ParentType(), DotLoc(DotLoc), NameLoc(NameLoc), Name(Name),
+      ElementDeclOrUnresolvedOriginalExpr(UnresolvedOriginalExpr),
+      SubPattern(SubPattern) {
+    
   }
 
   bool hasSubPattern() const { return SubPattern; }
@@ -588,8 +541,19 @@ public:
   
   Identifier getName() const { return Name; }
   
-  EnumElementDecl *getElementDecl() const { return ElementDecl; }
-  void setElementDecl(EnumElementDecl *d) { ElementDecl = d; }
+  EnumElementDecl *getElementDecl() const {
+    return ElementDeclOrUnresolvedOriginalExpr.dyn_cast<EnumElementDecl*>();
+  }
+  void setElementDecl(EnumElementDecl *d) {
+    ElementDeclOrUnresolvedOriginalExpr = d;
+  }
+  
+  Expr *getUnresolvedOriginalExpr() const {
+    return ElementDeclOrUnresolvedOriginalExpr.get<Expr*>();
+  }
+  bool hasUnresolvedOriginalExpr() const {
+    return ElementDeclOrUnresolvedOriginalExpr.is<Expr*>();
+  }
   
   SourceLoc getNameLoc() const { return NameLoc; }
   SourceLoc getLoc() const { return NameLoc; }
@@ -599,7 +563,10 @@ public:
                                     : NameLoc;
   }
   SourceLoc getEndLoc() const {
-    return SubPattern ? SubPattern->getSourceRange().End : NameLoc;
+    if (SubPattern && SubPattern->getSourceRange().isValid()) {
+      return SubPattern->getSourceRange().End;
+    }
+    return NameLoc;
   }
   SourceRange getSourceRange() const { return {getStartLoc(), getEndLoc()}; }
   
@@ -693,13 +660,7 @@ class ExprPattern : public Pattern {
 public:
   /// Construct an ExprPattern.
   ExprPattern(Expr *e, bool isResolved, Expr *matchExpr, VarDecl *matchVar,
-              Optional<bool> implicit = None)
-    : Pattern(PatternKind::Expr), SubExprAndIsResolved(e, isResolved),
-      MatchExpr(matchExpr), MatchVar(matchVar) {
-    assert(!matchExpr || e->isImplicit() == matchExpr->isImplicit());
-    if (implicit.hasValue() ? *implicit : e->isImplicit())
-      setImplicit();
-  }
+              Optional<bool> implicit = None);
   
   /// Construct an unresolved ExprPattern.
   ExprPattern(Expr *e)
@@ -726,8 +687,8 @@ public:
     MatchVar = v;
   }
   
-  SourceLoc getLoc() const { return getSubExpr()->getLoc(); }
-  SourceRange getSourceRange() const { return getSubExpr()->getSourceRange(); }
+  SourceLoc getLoc() const;
+  SourceRange getSourceRange() const;
   
   /// True if pattern resolution has been applied to the subexpression.
   bool isResolved() const { return SubExprAndIsResolved.getInt(); }

@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-sil %s -parse-stdlib -o /dev/null -verify
+// RUN: %target-swift-frontend -assume-parsing-unqualified-ownership-sil -emit-sil %s -parse-stdlib -o /dev/null -verify
 
 import Swift
 
@@ -14,6 +14,7 @@ func test1() -> Int {
 }
 
 func takes_inout(_ a: inout Int) {}
+func takes_inout_any(_ a: inout Any) {}
 func takes_closure(_ fn: () -> ()) {}
 
 class SomeClass { 
@@ -47,6 +48,7 @@ func test2() {
   // Address-of with Builtin.addressof.
   var a4 : Int            // expected-note {{variable defined here}}
   Builtin.addressof(&a4)  // expected-error {{address of variable 'a4' taken before it is initialized}}
+  // expected-warning @-1 {{result of call to 'addressof' is unused}}
 
 
   // Closures.
@@ -80,6 +82,11 @@ func test2() {
     markUsed(b4!)
   }
   b4 = 7
+  
+  let b5: Any
+  b5 = "x"   
+  { takes_inout_any(&b5) }()   // expected-error {{immutable value 'b5' may not be passed inout}}
+  ({ takes_inout_any(&b5) })()   // expected-error {{immutable value 'b5' may not be passed inout}}
 
   // Structs
   var s1 : SomeStruct
@@ -413,7 +420,6 @@ class SomeDerivedClass : SomeClass {
 //  Delegating initializers
 //===----------------------------------------------------------------------===//
 
-
 class DelegatingCtorClass {
   var ivar: EmptyStruct
 
@@ -448,7 +454,7 @@ class DelegatingCtorClass {
   }                // expected-error {{self.init isn't called on all paths before returning from initializer}}
 
   convenience init(bool: Bool) {
-    doesntReturn()
+    doesNotReturn()
   }
 
   convenience init(double: Double) {
@@ -530,50 +536,15 @@ protocol TriviallyConstructible {
 }
 
 extension TriviallyConstructible {
-  init(up: Int) {
-    self.init()
-    go(up)
-  }
-
   init(down: Int) {
     go(down) // expected-error {{'self' used before self.init call}}
     self.init()
   }
 }
 
-class TrivialClass : TriviallyConstructible {
-  required init() {}
-
-  func go(_ x: Int) {}
-
-  convenience init(y: Int) {
-    self.init(up: y * y)
-  }
-}
-
-struct TrivialStruct : TriviallyConstructible {
-  init() {}
-
-  func go(_ x: Int) {}
-
-  init(y: Int) {
-    self.init(up: y * y)
-  }
-}
-
-enum TrivialEnum : TriviallyConstructible {
-  case NotSoTrivial
-
-  init() {
-    self = NotSoTrivial
-  }
-
-  func go(_ x: Int) {}
-
-  init(y: Int) {
-    self.init(up: y * y)
-  }
-}
+//===----------------------------------------------------------------------===//
+//  Various bugs
+//===----------------------------------------------------------------------===//
 
 // rdar://16119509 - Dataflow problem where we reject valid code.
 class rdar16119509_Buffer {
@@ -607,8 +578,7 @@ class Foo {
 
 
 
-@noreturn
-func doesntReturn() {
+func doesNotReturn() -> Never {
   while true {}
 }
 
@@ -619,7 +589,7 @@ func testNoReturn1(_ b : Bool) -> Any {
   if b {
     a = 42
   } else {
-    doesntReturn()
+    doesNotReturn()
   }
 
   return a   // Ok, because the noreturn call path isn't viable.
@@ -638,10 +608,10 @@ func testNoReturn2(_ b : Bool) -> Any {
 }
 
 class PerpetualMotion {
-  @noreturn func start() {
+  func start() -> Never {
     repeat {} while true
   }
-  @noreturn static func stop() {
+  static func stop() -> Never {
     repeat {} while true
   }
 }
@@ -899,7 +869,7 @@ struct LetProperties {
     arr = []
     arr += []      // expected-error {{mutating operator '+=' may not be used on immutable value 'self.arr'}}
     arr.append(4)  // expected-error {{mutating method 'append' may not be used on immutable value 'self.arr'}}
-    arr[12] = 17   // expected-error {{immutable value 'self.arr' may not be assigned to}}
+    arr[12] = 17   // expected-error {{mutating subscript 'subscript' may not be used on immutable value 'self.arr'}}
   }
 }
 
@@ -1157,7 +1127,7 @@ func test22436880() {
 
 // sr-184
 let x: String? // expected-note 2 {{constant defined here}}
-print(x?.characters.count) // expected-error {{constant 'x' used before being initialized}}
+print(x?.characters.count as Any) // expected-error {{constant 'x' used before being initialized}}
 print(x!) // expected-error {{constant 'x' used before being initialized}}
 
 
@@ -1214,3 +1184,81 @@ class r23013334Derived : rdar16119509_Base {
 
 }
 
+// sr-1469
+struct SR1469_Struct1 {
+  let a: Int
+  let b: Int // expected-note {{'self.b' not initialized}}
+  
+  init?(x: Int, y: Int) {
+    self.a = x
+    if y == 42 {
+      return // expected-error {{return from initializer without initializing all stored properties}}
+    }
+    // many lines later
+    self.b = y
+  }
+}
+
+struct SR1469_Struct2 {
+  let a: Int
+  let b: Int // expected-note {{'self.b' not initialized}}
+  
+  init?(x: Int, y: Int) {
+    self.a = x
+    return // expected-error {{return from initializer without initializing all stored properties}}
+  }
+}
+
+struct SR1469_Struct3 {
+  let a: Int
+  let b: Int // expected-note {{'self.b' not initialized}}
+  
+  init?(x: Int, y: Int) {
+    self.a = x
+    if y == 42 {
+      self.b = y
+      return
+    }
+  } // expected-error {{return from initializer without initializing all stored properties}}
+}
+
+enum SR1469_Enum1 {
+  case A, B
+  
+  init?(x: Int) {
+    if x == 42 {
+      return // expected-error {{return from enum initializer method without storing to 'self'}}
+    }
+    // many lines later
+    self = .A
+  }
+}
+
+enum SR1469_Enum2 {
+  case A, B
+  
+  init?() {
+    return // expected-error {{return from enum initializer method without storing to 'self'}}
+  }
+}
+enum SR1469_Enum3 {
+  case A, B
+  
+  init?(x: Int) {
+    if x == 42 {
+      self = .A
+      return
+    }
+  } // expected-error {{return from enum initializer method without storing to 'self'}}
+}
+
+class BadFooSuper {
+  init() {}
+  init(_ x: BadFooSuper) {}
+}
+
+class BadFooSubclass: BadFooSuper {
+  override init() {
+    super.init(self) // expected-error {{'self' used before super.init call}}
+  }
+}

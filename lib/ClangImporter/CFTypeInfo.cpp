@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -39,7 +39,7 @@ namespace {
               (lhs.size() == rhs.size() && lhs < rhs));
     }
   };
-}
+} // end anonymous namespace
 
 template <size_t Len>
 static constexpr size_t string_lengthof(const char (&data)[Len]) {
@@ -89,10 +89,10 @@ CFPointeeInfo::classifyTypedef(const clang::TypedefNameDecl *typedefDecl) {
             isWhitelistedCFTypeName(typedefDecl->getName())) {
           return forRecord(isConst, record->getDecl());
         }
-      } else if (isConst && pointee->isVoidType()) {
+      } else if (pointee->isVoidType()) {
         if (typedefDecl->hasAttr<clang::ObjCBridgeAttr>() ||
             isWhitelistedCFTypeName(typedefDecl->getName())) {
-          return forConstVoid();
+          return isConst ? forConstVoid() : forVoid();
         }
       }
     }
@@ -101,35 +101,20 @@ CFPointeeInfo::classifyTypedef(const clang::TypedefNameDecl *typedefDecl) {
   return forInvalid();
 }
 
-/// Return the name to import a CF typedef as.
-static StringRef getImportedCFTypeName(StringRef name) {
-  // If the name ends in the CF typedef suffix ("Ref"), drop that.
-  if (name.endswith(SWIFT_CFTYPE_SUFFIX))
-    return name.drop_back(strlen(SWIFT_CFTYPE_SUFFIX));
-  return name;
-}
-
-bool ClangImporter::Implementation::isCFTypeDecl(
+bool importer::isCFTypeDecl(
        const clang::TypedefNameDecl *Decl) {
   if (CFPointeeInfo::classifyTypedef(Decl))
     return true;
   return false;
 }
 
-StringRef ClangImporter::Implementation::getCFTypeName(
-            const clang::TypedefNameDecl *decl,
-            StringRef *secondaryName) {
-  if (secondaryName) *secondaryName = "";
-
+StringRef importer::getCFTypeName(
+            const clang::TypedefNameDecl *decl) {
   if (auto pointee = CFPointeeInfo::classifyTypedef(decl)) {
     auto name = decl->getName();
-    if (pointee.isRecord() || pointee.isTypedef()) {
-      auto resultName = getImportedCFTypeName(name);
-      if (secondaryName && name != resultName)
-        *secondaryName = name;
-
-      return resultName;
-    }
+    if (pointee.isRecord() || pointee.isTypedef())
+      if (name.endswith(SWIFT_CFTYPE_SUFFIX))
+        return name.drop_back(strlen(SWIFT_CFTYPE_SUFFIX));
 
     return name;
   }

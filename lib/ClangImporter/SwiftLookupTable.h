@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -27,6 +27,7 @@
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TinyPtrVector.h"
+#include "llvm/Support/Compiler.h"
 #include <functional>
 #include <utility>
 
@@ -55,31 +56,33 @@ namespace swift {
 /// Swift name, this will be recorded as
 class EffectiveClangContext {
 public:
-  enum Kind {
+  enum Kind : uint8_t {
     DeclContext,
     TypedefContext,
-    UnresolvedContext,
+    UnresolvedContext, // must be last
   };
 
 private:
-  Kind TheKind;
-
   union {
     const clang::DeclContext *DC;
     const clang::TypedefNameDecl *Typedef;
     struct {
       const char *Data;
-      unsigned Length;
     } Unresolved;
   };
 
-  
+  /// If KindOrBiasedLength < Kind::UnresolvedContext, this represents a Kind.
+  /// Otherwise it's (uintptr_t)Kind::UnresolvedContext plus the length of
+  /// Unresolved.Data.
+  uintptr_t KindOrBiasedLength;
+
 public:
-  EffectiveClangContext() : TheKind(DeclContext) {
+  EffectiveClangContext() : KindOrBiasedLength(DeclContext) {
     DC = nullptr;
   }
 
-  EffectiveClangContext(const clang::DeclContext *dc) : TheKind(DeclContext) {
+  EffectiveClangContext(const clang::DeclContext *dc)
+      : KindOrBiasedLength(DeclContext) {
     assert(dc != nullptr && "use null constructor instead");
     if (auto tagDecl = dyn_cast<clang::TagDecl>(dc)) {
       DC = tagDecl->getCanonicalDecl();
@@ -100,14 +103,13 @@ public:
   }
 
   EffectiveClangContext(const clang::TypedefNameDecl *typedefName)
-    : TheKind(TypedefContext)
-  {
+    : KindOrBiasedLength(TypedefContext) {
     Typedef = typedefName->getCanonicalDecl();
   }
 
-  EffectiveClangContext(StringRef unresolved) : TheKind(UnresolvedContext) {
+  EffectiveClangContext(StringRef unresolved)
+      : KindOrBiasedLength(UnresolvedContext + unresolved.size()) {
     Unresolved.Data = unresolved.data();
-    Unresolved.Length = unresolved.size();
   }
 
   /// Determine whether this effective Clang context was set.
@@ -116,7 +118,12 @@ public:
   }
 
   /// Determine the kind of effective Clang context.
-  Kind getKind() const { return TheKind; }
+  Kind getKind() const {
+    if (KindOrBiasedLength >= UnresolvedContext)
+      return UnresolvedContext;
+    return static_cast<Kind>(KindOrBiasedLength);
+
+  }
 
   /// Retrieve the declaration context.
   const clang::DeclContext *getAsDeclContext() const {
@@ -132,9 +139,26 @@ public:
   /// Retrieve the unresolved context name.
   StringRef getUnresolvedName() const {
     assert(getKind() == UnresolvedContext);
-    return StringRef(Unresolved.Data, Unresolved.Length);
+    return StringRef(Unresolved.Data, KindOrBiasedLength - UnresolvedContext);
+  }
+
+  /// Compares two EffectiveClangContexts without resolving unresolved names.
+  bool equalsWithoutResolving(const EffectiveClangContext &other) const {
+    if (getKind() != other.getKind())
+      return false;
+    switch (getKind()) {
+    case DeclContext:
+      return DC == other.DC;
+    case TypedefContext:
+      return Typedef == other.Typedef;
+    case UnresolvedContext:
+      return getUnresolvedName() == other.getUnresolvedName();
+    }
   }
 };
+
+static_assert(sizeof(EffectiveClangContext) <= 2 * sizeof(void *),
+              "should be small");
 
 class SwiftLookupTableReader;
 class SwiftLookupTableWriter;
@@ -249,20 +273,6 @@ public:
     return bits | 0x01;
   }
 
-  /// Encode a declaration ID as an entry in the table.
-  static uintptr_t encodeDeclID(clang::serialization::DeclID id) {
-    auto upper = static_cast<uintptr_t>(id) << 2;
-    assert(upper >> 2 == id);
-    return upper | 0x02;
-  }
-
-  /// Encode a macro ID as an entry in the table.
-  static uintptr_t encodeMacroID(clang::serialization::MacroID id) {
-    auto upper = static_cast<uintptr_t>(id) << 2;
-    assert(upper >> 2 == id);
-    return upper | 0x02 | 0x01;
-  }
-
 private:
   /// A table mapping from the base name of Swift entities to all of
   /// the C entities that have that name, in all contexts.
@@ -297,7 +307,8 @@ private:
   /// present.
   ///
   /// \returns true if the entry was added, false otherwise.
-  bool addLocalEntry(SingleEntry newEntry, SmallVectorImpl<uintptr_t> &entries);
+  bool addLocalEntry(SingleEntry newEntry, SmallVectorImpl<uintptr_t> &entries,
+                     const clang::Preprocessor *PP);
 
 public:
   explicit SwiftLookupTable(SwiftLookupTableReader *reader) : Reader(reader) { }
@@ -324,7 +335,8 @@ public:
   /// \param newEntry The Clang declaration or macro.
   /// \param effectiveContext The effective context in which name lookup occurs.
   void addEntry(DeclName name, SingleEntry newEntry,
-                EffectiveClangContext effectiveContext);
+                EffectiveClangContext effectiveContext,
+                const clang::Preprocessor *PP = nullptr);
 
   /// Add an Objective-C category or extension to the table.
   void addCategory(clang::ObjCCategoryDecl *category);
@@ -396,88 +408,22 @@ public:
   void dump() const;
 };
 
-/// Module file extension writer for the Swift lookup tables.
-class SwiftLookupTableWriter : public clang::ModuleFileExtensionWriter {
-  clang::ASTWriter &Writer;
-  std::function<void(clang::Sema &, SwiftLookupTable &)> PopulateTable;
+namespace importer {
+class NameImporter;
 
-public:
-  SwiftLookupTableWriter(
-    clang::ModuleFileExtension *extension,
-    std::function<void(clang::Sema &, SwiftLookupTable &)> populateTable,
-    clang::ASTWriter &writer)
-      : ModuleFileExtensionWriter(extension), Writer(writer),
-        PopulateTable(std::move(populateTable)) { }
+/// Add the given named declaration as an entry to the given Swift name
+/// lookup table, including any of its child entries.
+void addEntryToLookupTable(SwiftLookupTable &table, clang::NamedDecl *named,
+                           NameImporter &);
 
-  void writeExtensionContents(clang::Sema &sema,
-                              llvm::BitstreamWriter &stream) override;
-};
+/// Add the macros from the given Clang preprocessor to the given
+/// Swift name lookup table.
+void addMacrosToLookupTable(SwiftLookupTable &table, NameImporter &);
 
-/// Module file extension reader for the Swift lookup tables.
-class SwiftLookupTableReader : public clang::ModuleFileExtensionReader {
-  clang::ASTReader &Reader;
-  clang::serialization::ModuleFile &ModuleFile;
-  std::function<void()> OnRemove;
-
-  void *SerializedTable;
-  ArrayRef<clang::serialization::DeclID> Categories;
-  void *GlobalsAsMembersTable;
-
-  SwiftLookupTableReader(clang::ModuleFileExtension *extension,
-                         clang::ASTReader &reader,
-                         clang::serialization::ModuleFile &moduleFile,
-                         std::function<void()> onRemove,
-                         void *serializedTable,
-                         ArrayRef<clang::serialization::DeclID> categories,
-                         void *globalsAsMembersTable)
-    : ModuleFileExtensionReader(extension), Reader(reader),
-      ModuleFile(moduleFile), OnRemove(onRemove),
-      SerializedTable(serializedTable), Categories(categories),
-      GlobalsAsMembersTable(globalsAsMembersTable) { }
-
-public:
-  /// Create a new lookup table reader for the given AST reader and stream
-  /// position.
-  static std::unique_ptr<SwiftLookupTableReader>
-  create(clang::ModuleFileExtension *extension, clang::ASTReader &reader,
-         clang::serialization::ModuleFile &moduleFile,
-         std::function<void()> onRemove,
-         const llvm::BitstreamCursor &stream);
-
-  ~SwiftLookupTableReader();
-
-  /// Retrieve the AST reader associated with this lookup table reader.
-  clang::ASTReader &getASTReader() const { return Reader; }
-
-  /// Retrieve the module file associated with this lookup table reader.
-  clang::serialization::ModuleFile &getModuleFile() { return ModuleFile; }
-
-  /// Retrieve the set of base names that are stored in the on-disk hash table.
-  SmallVector<StringRef, 4> getBaseNames();
-
-  /// Retrieve the set of entries associated with the given base name.
-  ///
-  /// \returns true if we found anything, false otherwise.
-  bool lookup(StringRef baseName,
-              SmallVectorImpl<SwiftLookupTable::FullTableEntry> &entries);
-
-  /// Retrieve the declaration IDs of the categories.
-  ArrayRef<clang::serialization::DeclID> categories() const {
-    return Categories;
-  }
-
-  /// Retrieve the set of contexts that have globals-as-members
-  /// injected into them.
-  SmallVector<SwiftLookupTable::StoredContext, 4> getGlobalsAsMembersContexts();
-
-  /// Retrieve the set of global declarations that are going to be
-  /// imported as members into the given context.
-  ///
-  /// \returns true if we found anything, false otherwise.
-  bool lookupGlobalsAsMembers(SwiftLookupTable::StoredContext context,
-                              SmallVectorImpl<uintptr_t> &entries);
-};
-
+/// Finalize a lookup table, handling any as-yet-unresolved entries
+/// and emitting diagnostics if necessary.
+void finalizeLookupTable(SwiftLookupTable &table, NameImporter &);
+}
 }
 
 namespace llvm {

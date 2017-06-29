@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -22,6 +22,8 @@
 
 #if (defined(__APPLE__) || defined(__linux__) || defined(__CYGWIN__) || defined(__FreeBSD__))
 #include "swift/Runtime/MutexPThread.h"
+#elif defined(_WIN32)
+#include "swift/Runtime/MutexWin32.h"
 #else
 #error "Implement equivalent of MutexPThread.h/cpp for your platform."
 #endif
@@ -390,7 +392,7 @@ class StaticConditionVariable {
   StaticConditionVariable &operator=(StaticConditionVariable &&) = delete;
 
 public:
-#if CONDITION_SUPPORTS_CONSTEXPR
+#if SWIFT_CONDITION_SUPPORTS_CONSTEXPR
   constexpr
 #endif
       StaticConditionVariable()
@@ -418,7 +420,7 @@ class StaticMutex {
   StaticMutex &operator=(StaticMutex &&) = delete;
 
 public:
-#if MUTEX_SUPPORTS_CONSTEXPR
+#if SWIFT_MUTEX_SUPPORTS_CONSTEXPR
   constexpr
 #endif
       StaticMutex()
@@ -493,7 +495,7 @@ class StaticReadWriteLock {
   StaticReadWriteLock &operator=(StaticReadWriteLock &&) = delete;
 
 public:
-#if READWRITELOCK_SUPPORTS_CONSTEXPR
+#if SWIFT_READWRITELOCK_SUPPORTS_CONSTEXPR
   constexpr
 #endif
       StaticReadWriteLock()
@@ -558,7 +560,7 @@ class StaticUnsafeMutex {
   StaticUnsafeMutex &operator=(StaticUnsafeMutex &&) = delete;
 
 public:
-#if MUTEX_SUPPORTS_CONSTEXPR
+#if SWIFT_MUTEX_SUPPORTS_CONSTEXPR
   constexpr
 #endif
       StaticUnsafeMutex()
@@ -712,7 +714,7 @@ typedef ScopedRWLockT<ReadWriteLock, false, true> ScopedWriteUnlock;
 typedef ScopedRWLockT<StaticReadWriteLock, false, true> StaticScopedWriteUnlock;
 
 // Enforce literal requirements for static variants.
-#if MUTEX_SUPPORTS_CONSTEXPR
+#if SWIFT_MUTEX_SUPPORTS_CONSTEXPR
 static_assert(std::is_literal_type<StaticMutex>::value,
               "StaticMutex must be literal type");
 static_assert(std::is_literal_type<StaticUnsafeMutex>::value,
@@ -722,7 +724,7 @@ static_assert(std::is_literal_type<StaticUnsafeMutex>::value,
 // you will possibly see global-constructors warnings
 #endif
 
-#if CONDITION_SUPPORTS_CONSTEXPR
+#if SWIFT_CONDITION_SUPPORTS_CONSTEXPR
 static_assert(std::is_literal_type<StaticConditionVariable>::value,
               "StaticConditionVariable must be literal type");
 #else
@@ -730,7 +732,7 @@ static_assert(std::is_literal_type<StaticConditionVariable>::value,
 // you will possibly see global-constructors warnings
 #endif
 
-#if READWRITELOCK_SUPPORTS_CONSTEXPR
+#if SWIFT_READWRITELOCK_SUPPORTS_CONSTEXPR
 static_assert(std::is_literal_type<StaticReadWriteLock>::value,
               "StaticReadWriteLock must be literal type");
 #else

@@ -120,7 +120,7 @@ in the following ``C.array1`` and ``D.array1`` will be accessed directly
   }
 
   class D {
-    final var array1 [Int] // 'array1' cannot be overridden by a computed property.
+    final var array1: [Int] // 'array1' cannot be overridden by a computed property.
     var array2: [Int]      // 'array2' *can* be overridden by a computed property.
   }
 
@@ -134,17 +134,17 @@ in the following ``C.array1`` and ``D.array1`` will be accessed directly
      d.array2[i] = ... // Will access D.array2 through dynamic dispatch.
   }
 
-Advice: Use 'private' when declaration does not need to be accessed outside of file
------------------------------------------------------------------------------------
+Advice: Use 'private' and 'fileprivate' when declaration does not need to be accessed outside of file
+-----------------------------------------------------------------------------------------------------
 
-Applying the ``private`` keyword to a declaration restricts the visibility of
-the declaration to the file in which it is declared. This allows the compiler to
-be able to ascertain all other potentially overriding declarations. Thus the
-absence of any such declarations enables the compiler to infer the ``final``
-keyword automatically and remove indirect calls for methods and field accesses
-accordingly. For instance in the following, ``e.doSomething()`` and
-``f.myPrivateVar``, will be able to be accessed directly assuming ``E``, ``F``
-do not have any overriding declarations in the same file:
+Applying the ``private`` or ``fileprivate`` keywords to a declaration restricts
+the visibility of the declaration to the file in which it is declared. This
+allows the compiler to be able to ascertain all other potentially overriding
+declarations. Thus the absence of any such declarations enables the compiler to
+infer the ``final`` keyword automatically and remove indirect calls for methods
+and field accesses accordingly. For instance in the following,
+``e.doSomething()`` and ``f.myPrivateVar``, will be able to be accessed directly
+assuming ``E``, ``F`` do not have any overriding declarations in the same file:
 
 ::
 
@@ -153,7 +153,7 @@ do not have any overriding declarations in the same file:
   }
 
   class F {
-    private var myPrivateVar : Int
+    fileprivate var myPrivateVar : Int
   }
 
   func usingE(_ e: E) {
@@ -319,8 +319,8 @@ generics. Some more examples of generics:
 
   func myAlgorithm(_ a: [T], length: Int) { ... }
 
-  // The compiler can specialize code of MyStack[Int]
-  var stackOfInts: MyStack[Int]
+  // The compiler can specialize code of MyStack<Int>
+  var stackOfInts: MyStack<Int>
   // Use stack of ints.
   for i in ... {
     stack.push(...)
@@ -342,49 +342,6 @@ the generic, unless the ``-whole-module-optimization`` flag is
 used. *NOTE* The standard library is a special case. Definitions in
 the standard library are visible in all modules and available for
 specialization.
-
-Advice: Use @_specialize to direct the compiler to specialize generics
-----------------------------------------------------------------------
-
-The compiler only automatically specializes generic code if the call
-site and the callee function are located in the same module. However,
-the programmer can provide hints to the compiler in the form of
-@_specialize attributes. For details see
-:ref:`generics-specialization`.
-
-This attribute instructs the compiler to specialize on the specified
-concrete type list. The compiler inserts type checks and dispatches
-from the generic function to the specialized variant. In the following
-example, injecting the @_specialize attribute speeds up the code by
-about 10 times.
-
-::
-
-  /// --------------- 
-  /// Framework.swift
-
-  public protocol Pingable { func ping() -> Self }
-  public protocol Playable { func play() }
-   
-  extension Int : Pingable {
-    public func ping() -> Int { return self + 1 }
-  }
-   
-  public class Game<T : Pingable> : Playable {
-    var t : T
-   
-    public init (_ v : T) {t = v}
-   
-    @_specialize(Int)
-    public func play() {
-      for _ in 0...100_000_000 { t = t.ping() }
-    }
-  }
-
-  /// -----------------
-  /// Application.swift
-
-  Game(10).play
 
 The cost of large Swift values
 ==============================
@@ -522,7 +479,7 @@ count operations are expensive and unavoidable when using Swift classes.
 Advice: Use unmanaged references to avoid reference counting overhead
 ---------------------------------------------------------------------
 
-Note, ``Unmanaged<T>._withUnsafeGuaranteedRef`` is not public api and will go
+Note, ``Unmanaged<T>._withUnsafeGuaranteedRef`` is not a public API and will go
 away in the future. Therefore, don't use it in code that you can not change in
 the future.
 
@@ -530,7 +487,7 @@ In performance-critical code you can choose to use unmanaged references. The
 ``Unmanaged<T>`` structure allows developers to disable automatic reference
 counting for a specific reference.
 
-When you do this you need to make sure that there exists another reference to
+When you do this, you need to make sure that there exists another reference to
 instance held by the ``Unmanaged`` struct instance for the duration of the use
 of ``Unmanaged`` (see `Unmanaged.swift`_ for more details) that keeps the instance
 alive.
@@ -586,6 +543,15 @@ protocols as class-only protocols to get better runtime performance.
 .. https://developer.apple.com/library/ios/documentation/Swift/Conceptual/Swift_Programming_Language/Protocols.html
 
 
+Unsupported Optimization Attributes
+===================================
+
+Some underscored type attributes function as optimizer directives. Developers
+are welcome to experiment with these attributes and send back bug reports and
+other feedback, including meta bug reports on the following incomplete
+documentation: :ref:`UnsupportedOptimizationAttributes`. These attributes are
+not supported language features. They have not been reviewed by Swift Evolution
+and are likely to change between compiler releases.
 
 Footnotes
 =========
@@ -599,7 +565,8 @@ Footnotes
 
 .. [#] i.e. a direct load of a class's field or a direct call to a function.
 
-.. [#] Explain what COW is here.
+.. [#] An optimization technique in which a copy will be made if and only if
+        a modification happens to the original copy, otherwise a pointer will be given.
 
 .. [#] In certain cases the optimizer is able to via inlining and ARC
        optimization remove the retain, release causing no copy to occur.

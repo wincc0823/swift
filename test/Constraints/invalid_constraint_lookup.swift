@@ -1,17 +1,16 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 protocol P {
   associatedtype A
   func makeIterator() -> Int
 }
 func f<U: P>(_ rhs: U) -> X<U.A> { // expected-error {{use of undeclared type 'X'}}
-  // FIXME: This diagnostic isn't great, it happens because the generic constraint
-  // 'U' from the invalid type signature never gets resolved.
-  let iter = rhs.makeIterator() // expected-error {{cannot invoke 'makeIterator' with no arguments}}
+  let iter = rhs.makeIterator()
 }
 
 struct Zzz<T> {
-  subscript (a: Foo) -> Zzz<T> { // expected-error {{use of undeclared type 'Foo'}}
+  // FIXME: Duplicate diagnostics
+  subscript (a: Foo) -> Zzz<T> { // expected-error 2{{use of undeclared type 'Foo'}}
   get: // expected-error {{expected '{' to start getter definition}}
   set:
     for i in value {}

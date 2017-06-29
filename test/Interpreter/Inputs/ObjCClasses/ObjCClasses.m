@@ -1,12 +1,19 @@
 #import "ObjCClasses.h"
 #import <Foundation/NSError.h>
 #include <stdio.h>
+#include <assert.h>
 
 @implementation HasHiddenIvars
 @synthesize x;
 @synthesize y;
 @synthesize z;
 @synthesize t;
+@end
+
+@implementation HasHiddenIvars2
+@synthesize x;
+@synthesize y;
+@synthesize z;
 @end
 
 @implementation TestingNSError
@@ -123,3 +130,43 @@ static int _value = 0;
 
 #endif
 
+@implementation BridgedInitializer
+- (id) initWithArray: (NSArray*) array {
+  _objects = array;
+  return self;
+}
+- (NSInteger) count {
+  return _objects.count;
+}
+@end
+
+static unsigned counter = 0;
+
+@implementation NSLifetimeTracked
+
++ (id) allocWithZone:(NSZone *)zone {
+  counter++;
+  return [super allocWithZone:zone];
+}
+
+- (void) dealloc {
+  counter--;
+}
+
++ (unsigned) count {
+  return counter;
+}
+
+@end
+
+@implementation TestingBool
+
+- (void) shouldBeTrueObjCBool: (BOOL)value {
+  assert(value);
+}
+
+- (void) shouldBeTrueCBool: (_Bool)value {
+  assert(value);
+}
+
+@end

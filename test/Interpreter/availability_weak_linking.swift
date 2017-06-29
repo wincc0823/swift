@@ -1,4 +1,4 @@
-// RUN: rm -rf %t && mkdir -p %t
+// RUN: %empty-directory(%t)
 // RUN: cp -R %S/Inputs/FakeUnavailableObjCFramework.framework %t
 // RUN: %target-clang -dynamiclib %S/Inputs/FakeUnavailableObjCFramework.m -fmodules -F %t -framework Foundation -o %t/FakeUnavailableObjCFramework.framework/FakeUnavailableObjCFramework
 
@@ -12,8 +12,8 @@
 // at run time.
 // RUN: mv %t/FakeUnavailableObjCFramework.framework %t/FakeUnavailableObjCFramework-MovedAside.framework
 
-// RUN: %target-run %t/UseWeaklinkedUnavailableObjCFramework | FileCheck %s
-// RUN: %target-run %t/UseWeaklinkedUnavailableObjCFramework.opt | FileCheck %s
+// RUN: %target-run %t/UseWeaklinkedUnavailableObjCFramework | %FileCheck %s
+// RUN: %target-run %t/UseWeaklinkedUnavailableObjCFramework.opt | %FileCheck %s
 
 // REQUIRES: objc_interop
 // REQUIRES: executable_test
@@ -138,6 +138,11 @@ func useUnavailableObjCClass() {
       _blackHole(asUnavailable)
     }
   }
+}
+
+@available(OSX 1066.0, iOS 1066.0, watchOS 1066.0, tvOS 1066.0, *)
+func wrapUnavailableFunction() {
+  someFunction()
 }
 
 useUnavailableObjCClass()

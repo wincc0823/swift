@@ -1,7 +1,7 @@
 #ifndef SWIFT_TEST_OBJC_CLASSES_H
 #define SWIFT_TEST_OBJC_CLASSES_H
 
-#import <Foundation/NSObject.h>
+#import <Foundation/NSArray.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -12,6 +12,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property NSInteger y;
 @property NSInteger z;
 @property NSInteger t;
+@end
+
+@interface HasHiddenIvars2 : NSObject
+@property id x;
+@property id y;
+@property id z;
 @end
 
 @interface TestingNSError : NSObject
@@ -87,6 +93,21 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 #endif // __has_feature(objc_class_property)
+
+@interface BridgedInitializer<T> : NSObject
+@property (readwrite) NSArray<T> *objects;
+@property (readonly) NSInteger count;
+- (id) initWithArray: (NSArray<T>*) array;
+@end
+
+@interface NSLifetimeTracked : NSObject
++ (unsigned) count;
+@end
+
+@interface TestingBool : NSObject
+- (void) shouldBeTrueObjCBool: (BOOL)value;
+- (void) shouldBeTrueCBool: (_Bool)value;
+@end
 
 NS_ASSUME_NONNULL_END
 

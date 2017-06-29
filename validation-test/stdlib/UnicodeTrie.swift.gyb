@@ -2,17 +2,18 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
-// RUN: rm -rf %t && mkdir -p %t && %S/../../utils/gyb -DunicodeGraphemeBreakPropertyFile=%S/../../utils/UnicodeData/GraphemeBreakProperty.txt -DunicodeGraphemeBreakTestFile=%S/../../utils/UnicodeData/GraphemeBreakTest.txt %s -o %t/UnicodeTrie.swift
-// RUN: %S/../../utils/line-directive %t/UnicodeTrie.swift -- %target-build-swift %t/UnicodeTrie.swift -o %t/a.out -g -Xfrontend -disable-access-control
-// RUN: %S/../../utils/line-directive %t/UnicodeTrie.swift -- %target-run %t/a.out
+// RUN: %empty-directory(%t)
+// RUN: %gyb -DunicodeGraphemeBreakPropertyFile=%utils/UnicodeData/GraphemeBreakProperty.txt -DunicodeGraphemeBreakTestFile=%utils/UnicodeData/GraphemeBreakTest.txt %s -o %t/UnicodeTrie.swift
+// RUN: %line-directive %t/UnicodeTrie.swift -- %target-build-swift %t/UnicodeTrie.swift -o %t/a.out -g -Xfrontend -disable-access-control
+// RUN: %line-directive %t/UnicodeTrie.swift -- %target-run %t/a.out
 // REQUIRES: executable_test
 
 // FIXME: rdar://problem/19648117 Needs splitting objc parts out
@@ -87,11 +88,17 @@ class NonContiguousNSString : NSString {
     fatalError("don't call this initializer")
   }
 
+  required init(itemProviderData data: Data, typeIdentifier: String) throws {
+    fatalError("don't call this initializer")    
+  }
+
+  @nonobjc
   init(_ value: [UInt16]) {
     _value = value
     super.init()
   }
 
+  @nonobjc
   convenience init(_ scalars: [UInt32]) {
     var encoded: [UInt16] = []
     let iter = scalars.makeIterator()
@@ -101,13 +108,13 @@ class NonContiguousNSString : NSString {
       from: UTF32.self,
       to: UTF16.self,
       stoppingOnError: true,
-      sendingOutputTo: output)
+      into: output)
     expectFalse(hadError)
     self.init(encoded)
   }
 
   @objc(copyWithZone:)
-  override func copy(with zone: NSZone?) -> AnyObject {
+  override func copy(with zone: NSZone?) -> Any {
     // Ensure that copying this string produces a class that CoreFoundation
     // does not know about.
     return self
@@ -142,7 +149,7 @@ func checkGraphemeClusterSegmentation(
   )
 
   let expectedCharacters: [Character] = Array(subject.characters)
-  checkSliceableWithBidirectionalIndex(expectedCharacters, subject.characters)
+  checkBidirectionalCollection(expectedCharacters, subject.characters)
 }
 
 func checkGraphemeClusterSegmentation(

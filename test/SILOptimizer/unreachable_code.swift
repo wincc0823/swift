@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-sil %s -o /dev/null -verify
+// RUN: %target-swift-frontend -emit-sil -primary-file %s -o /dev/null -verify
 func ifFalse() -> Int {
   if false { // expected-note {{always evaluates to false}}
     return 0 // expected-warning {{will never be executed}}
@@ -129,23 +129,6 @@ func testSwitchEnum(_ xi: Int) -> Int {
     x += 1
   }
 
-  switch cond { // no warning
-  case .Two: 
-    x += 1
-  }
-
-  switch cond {
-  case .One:
-    x += 1
-  } // expected-error{{switch must be exhaustive}}
-
-  switch cond {
-  case .One:
-    x += 1
-  case .Three:
-    x += 1
-  } // expected-error{{switch must be exhaustive}}
-
   switch cond { // expected-warning{{switch condition evaluates to a constant}}
   case .Two: 
     x += 1
@@ -163,111 +146,8 @@ func testSwitchEnum(_ xi: Int) -> Int {
   return x
 }
 
+@_silgen_name("exit") func exit() -> Never
 
-// Treat nil as .none and do not emit false 
-// non-exhaustive warning.
-func testSwitchEnumOptionalNil(_ x: Int?) -> Int {
-  switch x { // no warning
-  case .some(_):
-    return 1
-  case nil:
-    return -1
-  }
-}
-
-// Do not emit false non-exhaustive warnings if both
-// true and false are covered by the switch.
-func testSwitchEnumBool(_ b: Bool, xi: Int) -> Int {
-  var x = xi
-  let Cond = b
-  
-  switch Cond { // no warning
-  default:
-    x += 1
-  }
-
-  switch Cond {
-  case true:
-    x += 1
-  } // expected-error{{switch must be exhaustive}}
-
-  switch Cond {
-  case false:
-    x += 1
-  } // expected-error{{switch must be exhaustive}}
-
-  switch Cond { // no warning
-  case true:
-    x += 1
-  case false:
-    x -= 1
-  }
-
-  return x
-}
-
-func testSwitchOptionalBool(_ b: Bool?, xi: Int) -> Int {
-  var x = xi
-  switch b { // No warning
-  case .some(true):
-    x += 1
-  case .some(false):
-    x += 1
-  case .none:
-    x -= 1
-  }
-
-  switch b {
-  case .some(true):
-    x += 1
-  case .none:
-    x -= 1
-  } // expected-error{{switch must be exhaustive}}
-
-  return xi
-}
-
-// Do not emit false non-exhaustive warnings if both 
-// true and false are covered for a boolean element of a tuple.
-func testSwitchEnumBoolTuple(_ b1: Bool, b2: Bool, xi: Int) -> Int {
-  var x = xi
-  let Cond = (b1, b2)
-  
-  switch Cond { // no warning
-  default:
-    x += 1
-  }
-
-  switch Cond {
-  case (true, true):
-    x += 1
-    // FIXME: Two expect statements are written, because unreachable diagnostics produces N errors
-    // for non-exhaustive switches on tuples of N elements
-  } // expected-error{{switch must be exhaustive}} expected-error{{switch must be exhaustive}}
-
-  switch Cond {
-  case (false, true):
-    x += 1
-    // FIXME: Two expect statements are written, because unreachable diagnostics produces N errors
-    // for non-exhaustive switches on tuples of N elements
-  } // expected-error{{switch must be exhaustive}} expected-error{{switch must be exhaustive}}
-
-  switch Cond { // no warning
-  case (true, true):
-    x += 1
-  case (true, false):
-    x += 1
-  case (false, true):
-    x -= 1
-  case (false, false):
-    x -= 1
-  }
-
-  return x
-}
-
-
-@noreturn @_silgen_name("exit") func exit() -> ()
 func reachableThroughNonFoldedPredecessor(fn: @autoclosure () -> Bool = false) {
   if !_fastPath(fn()) {
     exit()
@@ -335,11 +215,10 @@ class r20097963MyClass {
   }
 }
 
-@noreturn
-func die() { die() }
+func die() -> Never { die() }
 
 func testGuard(_ a : Int) {
-  guard case 4 = a else {  }  // expected-error {{'guard' body may not fall through, consider using 'return' or 'break'}}
+  guard case 4 = a else {  }  // expected-error {{'guard' body may not fall through, consider using a 'return' or 'throw'}}
 
   guard case 4 = a else { return }  // ok
   guard case 4 = a else { die() }  // ok
@@ -350,22 +229,22 @@ func testGuard(_ a : Int) {
   }
 }
 
-public func testFailingCast(_ s:String) -> Int {
+func testFailingCast(_ s:String) -> Int {
    // There should be no notes or warnings about a call to a noreturn function, because we do not expose
    // how casts are lowered.
    return s as! Int // expected-warning {{cast from 'String' to unrelated type 'Int' always fails}}
 }
 
-enum MyError : ErrorProtocol { case A }
+enum MyError : Error { case A }
 
-@noreturn func raise() throws { throw MyError.A }
+func raise() throws -> Never { throw MyError.A }
 
 func test_raise_1() throws -> Int {
   try raise()
 }
 
 func test_raise_2() throws -> Int {
-  try raise() // expected-note {{a call to a noreturn function}}
+  try raise() // expected-note {{a call to a never-returning function}}
   try raise() // expected-warning {{will never be executed}}
 }
 
@@ -374,7 +253,7 @@ func test_raise_2() throws -> Int {
 struct Algol {
   var x: [UInt8]
 
-  @noreturn func fail() throws { throw MyError.A }
+  func fail() throws -> Never { throw MyError.A }
 
   mutating func blah() throws -> Int {
     try fail() // no-warning
@@ -382,7 +261,7 @@ struct Algol {
 }
 
 class Lisp {
-  @noreturn func fail() throws { throw MyError.A }
+  func fail() throws -> Never { throw MyError.A }
 }
 
 func transform<Scheme : Lisp>(_ s: Scheme) throws {
@@ -408,7 +287,7 @@ func deferTryNoReturn() throws {
 func noReturnInDefer() {
   defer {
     _ = Lisp()
-    die() // expected-note {{a call to a noreturn function}}
+    die() // expected-note {{a call to a never-returning function}}
     die() // expected-warning {{will never be executed}}
   }
 }
@@ -419,14 +298,30 @@ while true {
 
 
 // SR-1010 - rdar://25278336 - Spurious "will never be executed" warnings when building standard library
-public struct SR1010<T> {
+struct SR1010<T> {
   var a : T
 }
 
 extension SR1010 {
   @available(*, unavailable, message: "use the 'enumerated()' method on the sequence")
-  public init(_ base: Int) {
+  init(_ base: Int) {
     fatalError("unavailable function can't be called")
   }
 }
 
+// More spurious 'will never be executed' warnings
+struct FailingStruct {
+  init?(x: ()) {
+    fatalError("gotcha")
+  }
+}
+
+class FailingClass {
+  init?(x: ()) {
+    fatalError("gotcha")
+  }
+
+  convenience init?(y: ()) {
+    fatalError("gotcha")
+  }
+}

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 //
@@ -24,6 +24,7 @@
 #include "swift/Reflection/TypeLowering.h"
 #include "swift/Reflection/TypeRef.h"
 #include "swift/Reflection/TypeRefBuilder.h"
+#include "swift/Runtime/Unreachable.h"
 
 #include <iostream>
 #include <set>
@@ -64,6 +65,11 @@ public:
     return *this->Reader;
   }
 
+  unsigned getSizeOfHeapObject() {
+    // This must match sizeof(HeapObject) for the target.
+    return sizeof(StoredPointer) + 8;
+  }
+
   void dumpAllSections(std::ostream &OS) {
     getBuilder().dumpAllSections();
   }
@@ -92,17 +98,14 @@ public:
         // Figure out where the stored properties of this class begin
         // by looking at the size of the superclass
         bool valid;
-        unsigned size, align;
-        auto super =
-            this->readSuperClassFromClassMetadata(MetadataAddress);
-        if (super) {
-          std::tie(valid, size, align) =
-              this->readInstanceSizeAndAlignmentFromClassMetadata(super);
+        unsigned start;
+        std::tie(valid, start) =
+            this->readInstanceStartAndAlignmentFromClassMetadata(MetadataAddress);
 
-          // Perform layout
-          if (valid)
-            TI = TC.getClassInstanceTypeInfo(TR, size, align);
-        }
+        // Perform layout
+        if (valid)
+          TI = TC.getClassInstanceTypeInfo(TR, start);
+
         break;
       }
       default:
@@ -135,6 +138,12 @@ public:
       if (!CDAddr.first)
         return nullptr;
 
+      // FIXME: Non-generic SIL boxes also use the HeapLocalVariable metadata
+      // kind, but with a null capture descriptor right now (see
+      // FixedBoxTypeInfoBase::allocate).
+      //
+      // Non-generic SIL boxes share metadata among types with compatible
+      // layout, but we need some way to get an outgoing pointer map for them.
       auto *CD = getBuilder().getCaptureDescriptor(CDAddr.second);
       if (CD == nullptr)
         return nullptr;
@@ -144,12 +153,19 @@ public:
       return getClosureContextInfo(ObjectAddress, Info);
     }
 
-    case MetadataKind::HeapGenericLocalVariable:
-      // SIL @box type
+    case MetadataKind::HeapGenericLocalVariable: {
+      // Generic SIL @box type - there is always an instantiated metadata
+      // pointer for the boxed type.
+      if (auto Meta = readMetadata(MetadataAddress.second)) {
+        auto GenericHeapMeta =
+          cast<TargetGenericBoxHeapMetadata<Runtime>>(Meta.getLocalBuffer());
+        return getMetadataTypeInfo(GenericHeapMeta->BoxedType);
+      }
       return nullptr;
+    }
 
     case MetadataKind::ErrorObject:
-      // ErrorProtocol boxed existential on non-Objective-C runtime target
+      // Error boxed existential on non-Objective-C runtime target
       return nullptr;
 
     default:
@@ -177,7 +193,8 @@ public:
     // Class existentials have trivial layout.
     // It is itself the pointer to the instance followed by the witness tables.
     case RecordKind::ClassExistential:
-      *OutInstanceTR = getBuilder().getTypeConverter().getUnknownObjectTypeRef();
+      // This is just Builtin.UnknownObject
+      *OutInstanceTR = ExistentialRecordTI->getFields()[0].TR;
       *OutInstanceAddress = ExistentialAddress;
       return true;
 
@@ -227,7 +244,12 @@ public:
         if (!getReader().readInteger(ExistentialAddress, &BoxAddress))
           return false;
 
-        *OutInstanceAddress = RemoteAddress(BoxAddress);
+        // Address = BoxAddress + (sizeof(HeapObject) + alignMask) & ~alignMask)
+        auto Alignment = InstanceTI->getAlignment();
+        auto StartOfValue = BoxAddress + getSizeOfHeapObject();
+        // Align.
+        StartOfValue += Alignment - StartOfValue % Alignment;
+        *OutInstanceAddress = RemoteAddress(StartOfValue);
       }
       return true;
     }
@@ -287,7 +309,7 @@ public:
         return false;
 
       // Now we need to skip over the instance metadata pointer and instance's
-      // conformance pointer for Swift.ErrorProtocol.
+      // conformance pointer for Swift.Error.
       StoredPointer InstanceAddress = InstanceMetadataAddressAddress +
         2 * sizeof(StoredPointer);
 
@@ -329,7 +351,13 @@ private:
       return nullptr;
 
     // Initialize the builder.
-    Builder.addField(OffsetToFirstCapture.second, sizeof(StoredPointer));
+    Builder.addField(OffsetToFirstCapture.second, sizeof(StoredPointer),
+                     /*numExtraInhabitants=*/0);
+
+    // Skip the closure's necessary bindings struct, if it's present.
+    auto SizeOfNecessaryBindings = Info.NumBindings * sizeof(StoredPointer);
+    Builder.addField(SizeOfNecessaryBindings, sizeof(StoredPointer),
+                     /*numExtraInhabitants=*/0);
 
     // FIXME: should be unordered_set but I'm too lazy to write a hash
     // functor
@@ -344,6 +372,11 @@ private:
     // solve the problem.
     while (!CaptureTypes.empty()) {
       const TypeRef *OrigCaptureTR = CaptureTypes[0];
+
+      // If we failed to demangle the capture type, we cannot proceed.
+      if (OrigCaptureTR == nullptr)
+        return nullptr;
+
       const TypeRef *SubstCaptureTR = nullptr;
 
       // If we have enough substitutions to make this captured value's
@@ -435,6 +468,8 @@ private:
     case MetadataSourceKind::SelfWitnessTable:
       return true;
     }
+
+    swift_runtime_unreachable("Unhandled MetadataSourceKind in switch.");
   }
 
   /// Read metadata for a captured generic type from a closure context.
@@ -461,7 +496,7 @@ private:
       // the heap object header, in the 'necessary bindings' area.
       //
       // We should only have the index of a type metadata record here.
-      unsigned Offset = sizeof(StoredPointer) + 8 +
+      unsigned Offset = getSizeOfHeapObject() +
                         sizeof(StoredPointer) * Index;
 
       StoredPointer MetadataAddress;

@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -16,11 +16,12 @@
 #include "SourceKit/Support/Logging.h"
 #include "SourceKit/Support/UIdent.h"
 
-#include "swift/Basic/Fallthrough.h"
+#include "swift/AST/ASTPrinter.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/Frontend/PrintingDiagnosticConsumer.h"
 #include "swift/IDE/CodeCompletionCache.h"
 
+#include "llvm/Support/Compiler.h"
 #include "llvm/Support/MemoryBuffer.h"
 
 using namespace SourceKit;
@@ -61,12 +62,12 @@ struct SwiftToSourceKitCompletionAdapter {
 
     Completion extended(*result, name, description);
     return handleResult(consumer, &extended, /*leadingPunctuation=*/false,
-                        /*includeLiterals=*/false);
+                        /*legacyLiteralToKeyword=*/true);
   }
 
   static bool handleResult(SourceKit::CodeCompletionConsumer &consumer,
                            Completion *result, bool leadingPunctuation,
-                           bool includeLiterals);
+                           bool legacyLiteralToKeyword);
 
   static void getResultSourceText(const CodeCompletionString *CCStr,
                                   raw_ostream &OS);
@@ -219,9 +220,29 @@ void SwiftLangSupport::codeComplete(llvm::MemoryBuffer *UnresolvedInputFile,
                                     SourceKit::CodeCompletionConsumer &SKConsumer,
                                     ArrayRef<const char *> Args) {
   SwiftCodeCompletionConsumer SwiftConsumer([&](
-      MutableArrayRef<CodeCompletionResult *> Results, SwiftCompletionInfo &) {
+      MutableArrayRef<CodeCompletionResult *> Results,
+      SwiftCompletionInfo &info) {
+    bool hasExpectedType = info.completionContext->HasExpectedTypeRelation;
     CodeCompletionContext::sortCompletionResults(Results);
+    // FIXME: this adhoc filtering should be configurable like it is in the
+    // codeCompleteOpen path.
     for (auto *Result : Results) {
+      if (Result->getKind() == CodeCompletionResult::Literal) {
+        switch (Result->getLiteralKind()) {
+        case CodeCompletionLiteralKind::NilLiteral:
+        case CodeCompletionLiteralKind::BooleanLiteral:
+          break;
+        case CodeCompletionLiteralKind::ImageLiteral:
+        case CodeCompletionLiteralKind::ColorLiteral:
+          if (hasExpectedType &&
+              Result->getExpectedTypeRelation() <
+                  CodeCompletionResult::Convertible)
+            continue;
+          break;
+        default:
+          continue;
+        }
+      }
       if (!SwiftToSourceKitCompletionAdapter::handleResult(SKConsumer, Result))
         break;
     }
@@ -352,7 +373,7 @@ static void getResultStructure(
       if (!param.range().empty())
         parameters.push_back(std::move(param));
 
-      if (chunks[i].hasText())
+      if (i < chunks.size() && chunks[i].hasText())
         textSize += chunks[i].getText().size();
     }
 
@@ -410,7 +431,7 @@ static UIdent KeywordFuncUID("source.lang.swift.keyword.func");
 
 bool SwiftToSourceKitCompletionAdapter::handleResult(
     SourceKit::CodeCompletionConsumer &Consumer, Completion *Result,
-    bool leadingPunctuation, bool includeLiterals) {
+    bool leadingPunctuation, bool legacyLiteralToKeyword) {
 
   static UIdent KeywordUID("source.lang.swift.keyword");
   static UIdent PatternUID("source.lang.swift.pattern");
@@ -428,14 +449,14 @@ bool SwiftToSourceKitCompletionAdapter::handleResult(
     Info.Kind = SwiftLangSupport::getUIDForCodeCompletionDeclKind(
         Result->getAssociatedDeclKind());
   } else if (Result->getKind() == CodeCompletionResult::Literal) {
-    if (includeLiterals) {
-      Info.Kind = getUIDForCodeCompletionLiteralKind(Result->getLiteralKind());
-    } else if (Result->getLiteralKind() ==
-                   CodeCompletionLiteralKind::BooleanLiteral ||
-               Result->getLiteralKind() ==
-                   CodeCompletionLiteralKind::NilLiteral) {
-      // If we're not including literals, fallback to keywords as appropriate.
+    auto literalKind = Result->getLiteralKind();
+    if (legacyLiteralToKeyword &&
+        (literalKind == CodeCompletionLiteralKind::BooleanLiteral ||
+         literalKind == CodeCompletionLiteralKind::NilLiteral)) {
+      // Fallback to keywords as appropriate.
       Info.Kind = KeywordUID;
+    } else {
+      Info.Kind = getUIDForCodeCompletionLiteralKind(literalKind);
     }
   }
 
@@ -569,13 +590,12 @@ getCodeCompletionLiteralKindForUID(UIdent uid) {
 
 static CodeCompletionKeywordKind
 getCodeCompletionKeywordKindForUID(UIdent uid) {
-#define SIL_KEYWORD(kw)
-#define KEYWORD(kw)                                                            \
-  static UIdent Keyword##kw##UID("source.lang.swift.keyword." #kw);            \
-  if (uid == Keyword##kw##UID) {                                               \
-    return CodeCompletionKeywordKind::kw_##kw;                                 \
+#define SWIFT_KEYWORD(kw) \
+  static UIdent Keyword##kw##UID("source.lang.swift.keyword." #kw); \
+  if (uid == Keyword##kw##UID) { \
+    return CodeCompletionKeywordKind::kw_##kw; \
   }
-#include "swift/Parse/Tokens.def"
+#include "swift/Syntax/TokenKinds.def"
 
   // FIXME: should warn about unexpected keyword kind.
   return CodeCompletionKeywordKind::None;
@@ -642,7 +662,7 @@ void SwiftToSourceKitCompletionAdapter::getResultSourceText(
   for (size_t i = 0; i < Chunks.size(); ++i) {
     auto &C = Chunks[i];
     if (C.is(ChunkKind::BraceStmtWithCursor)) {
-      OS << " {\n<#code#>\n}";
+      OS << " {\n" << getCodePlaceholder() << "\n}";
       continue;
     }
     if (C.is(ChunkKind::CallParameterBegin)) {
@@ -761,7 +781,7 @@ public:
   bool handleResult(Completion *result) override {
     return SwiftToSourceKitCompletionAdapter::handleResult(
         consumer, result, /*leadingPunctuation=*/true,
-        /*includeLiterals=*/true);
+        /*legacyLiteralToKeyword=*/false);
   }
   void startGroup(StringRef name) override {
     static UIdent GroupUID("source.lang.swift.codecomplete.group");
@@ -845,7 +865,7 @@ static bool canonicalizeFilterName(const char *origName,
         if (next == ':' || next == ')')
           continue;
       }
-      SWIFT_FALLTHROUGH;
+      LLVM_FALLTHROUGH;
     default:
       Result.push_back(curr);
       continue;
@@ -867,7 +887,12 @@ static void translateFilterRules(ArrayRef<FilterRule> rawFilterRules,
         // Note: name is null-terminated.
         if (canonicalizeFilterName(name.data(), canonName))
           continue;
-        filterRules.hideByName[canonName] = rule.hide;
+        filterRules.hideByFilterName[canonName] = rule.hide;
+      }
+      break;
+    case FilterRule::Description:
+      for (auto name : rule.names) {
+        filterRules.hideByDescription[name] = rule.hide;
       }
       break;
     case FilterRule::Module:
@@ -928,14 +953,30 @@ template <typename Result>
 static std::vector<Result *>
 filterInnerResults(ArrayRef<Result *> results, bool includeInner,
                    bool includeInnerOperators,
-
-                   bool &hasDot, bool &hasQDot, bool &hasInit) {
+                   bool &hasDot, bool &hasQDot, bool &hasInit,
+                   const CodeCompletion::FilterRules &rules) {
   std::vector<Result *> topResults;
   for (auto *result : results) {
     if (!includeInnerOperators && result->isOperator())
       continue;
 
+    llvm::SmallString<64> filterName;
+    {
+      llvm::raw_svector_ostream OSS(filterName);
+      CodeCompletion::CompletionBuilder::getFilterName(
+          result->getCompletionString(), OSS);
+    }
+    llvm::SmallString<64> description;
+    {
+      llvm::raw_svector_ostream OSS(description);
+      CodeCompletion::CompletionBuilder::getDescription(
+          result, OSS, /*leadingPunctuation=*/false);
+    }
+    if (rules.hideCompletion(result, filterName, description))
+      continue;
+
     bool inner = checkInnerResult(result, hasDot, hasQDot, hasInit);
+
     if (!inner ||
         (includeInner &&
          result->getSemanticContext() <= SemanticContextKind::CurrentNominal))
@@ -989,13 +1030,14 @@ static void transformAndForwardResults(
       options, session->getCompletionKind(),
       session->getCompletionHasExpectedTypes());
 
+  auto &rules = session->getFilterRules();
+
   bool hasEarlyInnerResults =
       session->getCompletionKind() == CompletionKind::PostfixExpr;
 
   if (!hasEarlyInnerResults) {
     organizer.addCompletionsWithFilter(session->getSortedCompletions(),
-                                       filterText, session->getFilterRules(),
-                                       exactMatch);
+                                       filterText, rules, exactMatch);
   }
 
   if (hasEarlyInnerResults &&
@@ -1006,18 +1048,19 @@ static void transformAndForwardResults(
     auto completions = session->getSortedCompletions();
     auto innerResults =
         filterInnerResults(completions, options.addInnerResults,
-                           options.addInnerOperators, hasDot, hasQDot, hasInit);
+                           options.addInnerOperators, hasDot, hasQDot, hasInit,
+                           rules);
     if (options.addInnerOperators) {
-      if (hasInit)
+      if (hasInit && !rules.hideFilterName("("))
         innerResults.insert(innerResults.begin(), buildParen());
-      if (hasDot)
+      if (hasDot && !rules.hideFilterName("."))
         innerResults.insert(innerResults.begin(), buildDot());
-      if (hasQDot)
+      if (hasQDot && !rules.hideFilterName("?."))
         innerResults.insert(innerResults.begin(), buildQDot());
     }
 
     organizer.addCompletionsWithFilter(innerResults, filterText,
-                                       session->getFilterRules(), exactMatch);
+                                       CodeCompletion::FilterRules(), exactMatch);
   }
 
   organizer.groupAndSort(options);
@@ -1033,7 +1076,7 @@ static void transformAndForwardResults(
         SwiftCompletionInfo &info) {
       auto topResults = filterInnerResults(results, options.addInnerResults,
                                            options.addInnerOperators, hasDot,
-                                           hasQDot, hasInit);
+                                           hasQDot, hasInit, rules);
       // FIXME: Overriding the default to context "None" is a hack so that they
       // won't overwhelm other results that also match the filter text.
       innerResults = extendCompletions(
@@ -1063,18 +1106,18 @@ static void transformAndForwardResults(
     }
 
     if (options.addInnerOperators) {
-      if (hasInit)
+      if (hasInit && !rules.hideFilterName("("))
         innerResults.insert(innerResults.begin(), buildParen());
-      if (hasDot)
+      if (hasDot && !rules.hideFilterName("."))
         innerResults.insert(innerResults.begin(), buildDot());
-      if (hasQDot)
+      if (hasQDot && !rules.hideFilterName("?."))
         innerResults.insert(innerResults.begin(), buildQDot());
     }
 
     // Add the inner results (and don't filter them).
     exactMatch = nullptr; // No longer needed.
     organizer.addCompletionsWithFilter(innerResults, filterText,
-                                       session->getFilterRules(), exactMatch);
+                                       CodeCompletion::FilterRules(), exactMatch);
 
     CodeCompletion::Options noGroupOpts = options;
     noGroupOpts.groupStems = false;

@@ -2,20 +2,20 @@
 #
 # This source file is part of the Swift.org open source project
 #
-# Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+# Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 # Licensed under Apache License v2.0 with Runtime Library Exception
 #
-# See http://swift.org/LICENSE.txt for license information
-# See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+# See https://swift.org/LICENSE.txt for license information
+# See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 
 import platform
 import unittest
-
-# StringIO import path differs across Python 2 and 3.
 try:
-    from io import StringIO
+    # py2
+    from StringIO import StringIO
 except ImportError:
-    from cStringIO import StringIO
+    # py3
+    from io import StringIO
 
 from swift_build_support import debug
 
@@ -33,6 +33,8 @@ class PrintXcodebuildVersionsTestCase(unittest.TestCase):
         self.assertTrue(actual[0].startswith('Xcode '))
         self.assertTrue(actual[1].startswith('Build version '))
         self.assertEqual(actual[3], '--- SDK versions ---')
+        # You can't test beyond this because each developer's machines may have
+        # a different set of SDKs installed.
 
 
 if __name__ == '__main__':

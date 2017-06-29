@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 class A {
   init(int i: Int) { }
@@ -110,6 +110,27 @@ func testSubUnnamed(_ i: Int, d: Double, s: String, f: Float) {
   _ = SubUnnamed(f)
 }
 
+// rdar://problem/17960407 - Inheritance of generic initializers
+class ConcreteBase {
+  required init(i: Int) {}
+}
+
+class GenericDerived<T> : ConcreteBase {}
+
+class GenericBase<T> {
+  required init(t: T) {}
+}
+
+class GenericDerived2<U> : GenericBase<(U, U)> {}
+
+class ConcreteDerived : GenericBase<Int> {}
+
+func testGenericInheritance() {
+  _ = GenericDerived<Int>(i: 10)
+  _ = GenericDerived2<Int>(t: (10, 100))
+  _ = ConcreteDerived(t: 1000)
+}
+
 // FIXME: <rdar://problem/16331406> Implement inheritance of variadic designated initializers
 class SuperVariadic {
   init(ints: Int...) { } // expected-note{{variadic superclass initializer defined here}}
@@ -121,3 +142,11 @@ class SuperVariadic {
 
 class SubVariadic : SuperVariadic { } // expected-warning 4{{synthesizing a variadic inherited initializer for subclass 'SubVariadic' is unsupported}}
 
+// Don't crash with invalid nesting of class in generic function
+
+func testClassInGenericFunc<T>(t: T) {
+  class A { init(t: T) {} } // expected-error {{type 'A' cannot be nested in generic function 'testClassInGenericFunc'}}
+  class B : A {} // expected-error {{type 'B' cannot be nested in generic function 'testClassInGenericFunc'}}
+
+  _ = B(t: t)
+}

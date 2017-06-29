@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,6 +14,8 @@
 #include "swift/SILOptimizer/Analysis/ClassHierarchyAnalysis.h"
 #include "swift/SILOptimizer/Utils/Devirtualize.h"
 #include "swift/AST/Decl.h"
+#include "swift/AST/ProtocolConformance.h"
+#include "swift/AST/SubstitutionMap.h"
 #include "swift/AST/Types.h"
 #include "swift/SIL/SILDeclRef.h"
 #include "swift/SIL/SILFunction.h"
@@ -24,6 +26,7 @@
 #include "swift/SIL/InstructionUtils.h"
 #include "swift/SILOptimizer/Utils/Local.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Casting.h"
 using namespace swift;
@@ -60,11 +63,11 @@ static void getAllSubclasses(ClassHierarchyAnalysis *CHA,
   //SmallVector<ClassDecl *, 8> Subs(DirectSubs);
   Subs.append(IndirectSubs.begin(), IndirectSubs.end());
 
-  if (isa<BoundGenericClassType>(ClassType.getSwiftRValueType())) {
+  if (ClassType.is<BoundGenericClassType>()) {
     // Filter out any subclasses that do not inherit from this
     // specific bound class.
     auto RemovedIt = std::remove_if(Subs.begin(), Subs.end(),
-        [&ClassType, &M](ClassDecl *Sub){
+        [&ClassType](ClassDecl *Sub){
           auto SubCanTy = Sub->getDeclaredType()->getCanonicalType();
           // Unbound generic type can override a method from
           // a bound generic class, but this unbound generic
@@ -178,12 +181,14 @@ static bool isKnownFinalClass(ClassDecl *CD, SILModule &M,
 
   // Only consider 'private' members, unless we are in whole-module compilation.
   switch (CD->getEffectiveAccess()) {
-  case Accessibility::Public:
+  case Accessibility::Open:
     return false;
+  case Accessibility::Public:
   case Accessibility::Internal:
     if (!M.isWholeModule())
       return false;
     break;
+  case Accessibility::FilePrivate:
   case Accessibility::Private:
     break;
   }
@@ -197,12 +202,14 @@ static bool isKnownFinalClass(ClassDecl *CD, SILModule &M,
   if (CHA) {
     if (!CHA->hasKnownDirectSubclasses(CD)) {
       switch (CD->getEffectiveAccess()) {
-      case Accessibility::Public:
+      case Accessibility::Open:
         return false;
+      case Accessibility::Public:
       case Accessibility::Internal:
         if (!M.isWholeModule())
           return false;
         break;
+      case Accessibility::FilePrivate:
       case Accessibility::Private:
         break;
       }
@@ -221,21 +228,25 @@ static bool isKnownFinalClass(ClassDecl *CD, SILModule &M,
 // can be derived e.g.:
 // - from a constructor or
 // - from a successful outcome of a checked_cast_br [exact] instruction.
-static SILValue getInstanceWithExactDynamicType(SILValue S, SILModule &M,
+SILValue swift::getInstanceWithExactDynamicType(SILValue S, SILModule &M,
                                                 ClassHierarchyAnalysis *CHA) {
 
   while (S) {
     S = stripCasts(S);
-    if (isa<AllocRefInst>(S) || isa<MetatypeInst>(S))
+
+    if (isa<AllocRefInst>(S) || isa<MetatypeInst>(S)) {
+      if (S->getType().getSwiftRValueType()->hasDynamicSelfType())
+        return SILValue();
       return S;
+    }
 
     auto *Arg = dyn_cast<SILArgument>(S);
     if (!Arg)
       break;
 
-    auto *SinglePred = Arg->getParent()->getSinglePredecessor();
+    auto *SinglePred = Arg->getParent()->getSinglePredecessorBlock();
     if (!SinglePred) {
-      if (!Arg->isFunctionArg())
+      if (!isa<SILFunctionArgument>(Arg))
         break;
       auto *CD = Arg->getType().getClassOrBoundGenericClass();
       // Check if this class is effectively final.
@@ -247,7 +258,7 @@ static SILValue getInstanceWithExactDynamicType(SILValue S, SILModule &M,
     // Traverse the chain of predecessors.
     if (isa<BranchInst>(SinglePred->getTerminator()) ||
         isa<CondBranchInst>(SinglePred->getTerminator())) {
-      S = Arg->getIncomingValue(SinglePred);
+      S = cast<SILPHIArgument>(Arg)->getIncomingValue(SinglePred);
       continue;
     }
 
@@ -264,181 +275,210 @@ static SILValue getInstanceWithExactDynamicType(SILValue S, SILModule &M,
   return SILValue();
 }
 
-/// Return bound generic type for the unbound type Superclass,
-/// which is a superclass of a bound generic type BoundDerived
-/// (Base may be also the same as BoundDerived or may be
-/// non-generic at all).
-static CanType bindSuperclass(CanType Superclass,
-                                          SILType BoundDerived) {
-  assert(BoundDerived && "Expected non-null type!");
+/// Try to determine the exact dynamic type of an object.
+/// returns the exact dynamic type of the object, or an empty type if the exact
+/// type could not be determined.
+SILType swift::getExactDynamicType(SILValue S, SILModule &M,
+                                   ClassHierarchyAnalysis *CHA,
+                                   bool ForUnderlyingObject) {
+  // Set of values to be checked for their exact types.
+  SmallVector<SILValue, 8> WorkList;
+  // The detected type of the underlying object.
+  SILType ResultType;
+  // Set of processed values.
+  llvm::SmallSet<SILValue, 8> Processed;
+  WorkList.push_back(S);
 
-  SILType BoundSuperclass = BoundDerived;
+  while (!WorkList.empty()) {
+    auto V = WorkList.pop_back_val();
+    if (!V)
+      return SILType();
+    if (Processed.count(V))
+      continue;
+    Processed.insert(V);
+    // For underlying object strip casts and projections.
+    // For the object itself, simply strip casts.
+    V = ForUnderlyingObject ? getUnderlyingObject(V) : stripCasts(V);
 
-  do {
-    // Get declaration of the superclass.
-    auto *Decl = BoundSuperclass.getNominalOrBoundGenericNominal();
-    // Obtain the unbound variant of the current superclass
-    CanType UnboundSuperclass = Decl->getDeclaredType()->getCanonicalType();
-    // Check if we found a superclass we are looking for.
-    if (UnboundSuperclass == Superclass)
-      return BoundSuperclass.getSwiftRValueType();
-
-    // Get the superclass of current one
-    BoundSuperclass = BoundSuperclass.getSuperclass(nullptr);
-  } while (BoundSuperclass);
-
-  llvm_unreachable("Expected to find a bound generic superclass!");
-}
-
-// Returns true if any generic types parameters of the class are
-// unbound.
-bool swift::isNominalTypeWithUnboundGenericParameters(SILType Ty, SILModule &M) {
-  auto *ND = Ty.getNominalOrBoundGenericNominal();
-  if (ND && ND->getGenericSignature()) {
-    auto InstanceTypeSubsts =
-        Ty.gatherAllSubstitutions(M);
-
-    if (!InstanceTypeSubsts.empty()) {
-      if (hasUnboundGenericTypes(InstanceTypeSubsts))
-        return true;
+    if (isa<AllocRefInst>(V) || isa<MetatypeInst>(V)) {
+      if (ResultType && ResultType != V->getType())
+        return SILType();
+      ResultType = V->getType();
+      continue;
     }
+
+    if (isa<LiteralInst>(V)) {
+      if (ResultType && ResultType != V->getType())
+        return SILType();
+      ResultType = V->getType();
+      continue;
+    }
+
+    if (isa<StructInst>(V) || isa<TupleInst>(V) || isa<EnumInst>(V)) {
+      if (ResultType && ResultType != V->getType())
+        return SILType();
+      ResultType = V->getType();
+      continue;
+    }
+
+    if (ForUnderlyingObject) {
+      if (isa<AllocationInst>(V)) {
+        if (ResultType && ResultType != V->getType())
+          return SILType();
+        ResultType = V->getType();
+        continue;
+      }
+      // Look through strong_pin instructions.
+      if (isa<StrongPinInst>(V)) {
+        WorkList.push_back(cast<SILInstruction>(V)->getOperand(0));
+        continue;
+      }
+    }
+
+    auto Arg = dyn_cast<SILArgument>(V);
+    if (!Arg) {
+      // We don't know what it is.
+      return SILType();
+    }
+
+    if (auto *FArg = dyn_cast<SILFunctionArgument>(Arg)) {
+      // Bail on metatypes for now.
+      if (FArg->getType().is<AnyMetatypeType>()) {
+        return SILType();
+      }
+      auto *CD = FArg->getType().getClassOrBoundGenericClass();
+      // If it is not class and it is a trivial type, then it
+      // should be the exact type.
+      if (!CD && FArg->getType().isTrivial(M)) {
+        if (ResultType && ResultType != FArg->getType())
+          return SILType();
+        ResultType = FArg->getType();
+        continue;
+      }
+
+      if (!CD) {
+        // It is not a class or a trivial type, so we don't know what it is.
+        return SILType();
+      }
+
+      // Check if this class is effectively final.
+      if (!isKnownFinalClass(CD, M, CHA)) {
+        return SILType();
+      }
+
+      if (ResultType && ResultType != FArg->getType())
+        return SILType();
+      ResultType = FArg->getType();
+      continue;
+    }
+
+    auto *SinglePred = Arg->getParent()->getSinglePredecessorBlock();
+    if (SinglePred) {
+      // If it is a BB argument received on a success branch
+      // of a checked_cast_br, then we know its exact type.
+      auto *CCBI = dyn_cast<CheckedCastBranchInst>(SinglePred->getTerminator());
+      if (CCBI && CCBI->isExact() && CCBI->getSuccessBB() == Arg->getParent()) {
+        if (ResultType && ResultType != Arg->getType())
+          return SILType();
+        ResultType = Arg->getType();
+        continue;
+      }
+    }
+
+    // It is a BB argument, look through incoming values. If they all have the
+    // same exact type, then we consider it to be the type of the BB argument.
+    SmallVector<SILValue, 4> IncomingValues;
+
+    if (Arg->getIncomingValues(IncomingValues)) {
+      for (auto InValue : IncomingValues) {
+        WorkList.push_back(InValue);
+      }
+      continue;
+    }
+
+    // The exact type is unknown.
+    return SILType();
   }
 
-  if (Ty.hasArchetype())
-    return true;
+  return ResultType;
+}
 
-  return false;
+
+/// Try to determine the exact dynamic type of the underlying object.
+/// returns the exact dynamic type of a value, or an empty type if the exact
+/// type could not be determined.
+SILType
+swift::getExactDynamicTypeOfUnderlyingObject(SILValue S, SILModule &M,
+                                             ClassHierarchyAnalysis *CHA) {
+  return getExactDynamicType(S, M, CHA, /* ForUnderlyingObject */ true);
 }
 
 // Start with the substitutions from the apply.
 // Try to propagate them to find out the real substitutions required
 // to invoke the method.
-static ArrayRef<Substitution>
-getSubstitutionsForCallee(SILModule &M, CanSILFunctionType GenCalleeType,
-                          SILType ClassInstanceType, FullApplySite AI) {
-  // *NOTE*:
-  // Apply instruction substitutions are for the Member from a protocol or
-  // class B, where this member was first defined, before it got overridden by
-  // derived classes.
-  //
-  // The implementation F (the implementing method) which was found may have
-  // a different set of generic parameters, e.g. because it is implemented by a
-  // class D1 derived from B.
-  //
-  // ClassInstanceType may have a type different from both the type B
-  // the Member belongs to and from the ClassInstanceType, e.g. if
-  // ClassInstance is of a class D2, which is derived from D1, but does not
-  // override the Member.
-  //
-  // As a result, substitutions provided by AI are for Member, whereas
-  // substitutions in ClassInstanceType are for D2. And substitutions for D1
-  // are not available directly in a general case. Therefore, they have to
-  // be computed.
-  //
-  // What we know for sure:
-  //   B is a superclass of D1
-  //   D1 is a superclass of D2.
-  // D1 can be the same as D2. D1 can be the same as B.
-  //
-  // So, substitutions from AI are for class B.
-  // Substitutions for class D1 by means of bindSuperclass(), which starts
-  // with a bound type ClassInstanceType and checks its superclasses until it
-  // finds a bound superclass matching D1 and returns its substitutions.
+static void
+getSubstitutionsForCallee(SILModule &M,
+                          CanSILFunctionType baseCalleeType,
+                          CanType derivedSelfType,
+                          FullApplySite AI,
+                          SmallVectorImpl<Substitution> &newSubs) {
 
-  // Class F belongs to.
-  CanType FSelfClass = GenCalleeType->getSelfParameter().getType();
+  // If the base method is not polymorphic, no substitutions are required,
+  // even if we originally had substitutions for calling the derived method.
+  if (!baseCalleeType->isPolymorphic())
+    return;
 
-  auto *Module = M.getSwiftModule();
+  // Add any generic substitutions for the base class.
+  Type baseSelfType = baseCalleeType->getSelfParameter().getType();
+  if (auto metatypeType = baseSelfType->getAs<MetatypeType>())
+    baseSelfType = metatypeType->getInstanceType();
 
-  ArrayRef<Substitution> ClassSubs;
+  auto *baseClassDecl = baseSelfType->getClassOrBoundGenericClass();
+  assert(baseClassDecl && "not a class method");
 
-  if (GenCalleeType->isPolymorphic()) {
-    // Declaration of the class F belongs to.
-    if (auto *FSelfTypeDecl = FSelfClass.getNominalOrBoundGenericNominal()) {
-      // Get the unbound generic type F belongs to.
-      CanType FSelfGenericType =
-        FSelfTypeDecl->getDeclaredType()->getCanonicalType();
+  unsigned baseDepth = 0;
+  SubstitutionMap baseSubMap;
+  if (auto baseClassSig = baseClassDecl->getGenericSignatureOfContext()) {
+    baseDepth = baseClassSig->getGenericParams().back()->getDepth() + 1;
 
-      assert((isa<BoundGenericType>(ClassInstanceType.getSwiftRValueType()) ||
-              isa<NominalType>(ClassInstanceType.getSwiftRValueType())) &&
-             "Self type should be either a bound generic type"
-             "or a non-generic type");
-
-      assert((isa<UnboundGenericType>(FSelfGenericType) ||
-              isa<NominalType>(FSelfGenericType)) &&
-             "Method implementation self type should be generic");
-
-      if (isa<BoundGenericType>(ClassInstanceType.getSwiftRValueType())) {
-        auto BoundBaseType = bindSuperclass(FSelfGenericType,
-                                            ClassInstanceType);
-        if (auto BoundTy = BoundBaseType->getAs<BoundGenericType>()) {
-          ClassSubs = BoundTy->getSubstitutions(Module, nullptr);
-        }
-      }
-    }
-  } else {
-    // If the callee is not polymorphic, no substitutions are required.
-    return {};
+    // Compute the type of the base class, starting from the
+    // derived class type and the type of the method's self
+    // parameter.
+    Type derivedClass = derivedSelfType;
+    if (auto metatypeType = derivedClass->getAs<MetatypeType>())
+      derivedClass = metatypeType->getInstanceType();
+    baseSubMap = derivedClass->getContextSubstitutionMap(
+        M.getSwiftModule(), baseClassDecl);
   }
 
-  if (ClassSubs.empty())
-    return AI.getSubstitutions();
+  SubstitutionMap origSubMap;
+  if (auto origCalleeSig = AI.getOrigCalleeType()->getGenericSignature())
+    origSubMap = origCalleeSig->getSubstitutionMap(AI.getSubstitutions());
 
-  auto AISubs = AI.getSubstitutions();
+  Type calleeSelfType = AI.getOrigCalleeType()->getSelfParameter().getType();
+  if (auto metatypeType = calleeSelfType->getAs<MetatypeType>())
+    calleeSelfType = metatypeType->getInstanceType();
+  auto *calleeClassDecl = calleeSelfType->getClassOrBoundGenericClass();
+  assert(calleeClassDecl && "self is not a class type");
 
-  CanSILFunctionType AIGenCalleeType =
-      AI.getCallee()->getType().castTo<SILFunctionType>();
+  // Add generic parameters from the method itself, ignoring any generic
+  // parameters from the derived class.
+  unsigned origDepth = 0;
+  if (auto calleeClassSig = calleeClassDecl->getGenericSignatureOfContext())
+    origDepth = calleeClassSig->getGenericParams().back()->getDepth() + 1;
 
-  unsigned NextMethodParamIdx = 0;
-  unsigned NumMethodParams = 0;
-  if (AIGenCalleeType->isPolymorphic()) {
-    NextMethodParamIdx = AISubs.size();
-    if (auto AIMethodSig = AI.getOrigCalleeType()->getGenericSignature()) {
-      // Find out if the apply instruction contains any substitutions for
-      // a method itself, not for the class where it is declared.
-      // If there are any such parameters, remember where they start
-      // in the substitutions list.
-      auto InnermostGenericParams = AIMethodSig->getInnermostGenericParams();
-      auto InnermostGenericParamsNum = InnermostGenericParams.size();
-      if (InnermostGenericParamsNum != AIMethodSig->getGenericParams().size()) {
-        auto Depth = InnermostGenericParams[0]->getDepth();
-        for (NextMethodParamIdx = 0; NextMethodParamIdx < AISubs.size();
-             ++NextMethodParamIdx) {
-          if (auto SubstTy = dyn_cast<SubstitutedType>(
-                  AISubs[NextMethodParamIdx].getReplacement().getPointer())) {
-            if (auto *GenParamTy = dyn_cast<GenericTypeParamType>(
-                    SubstTy->getOriginal().getPointer()))
-              if (GenParamTy->getDepth() == Depth)
-                break;
-          }
-        }
-      }
-    }
-    NumMethodParams = AISubs.size() - NextMethodParamIdx;
-  }
+  auto baseCalleeSig = baseCalleeType->getGenericSignature();
 
-  unsigned NumSubs = ClassSubs.size() + NumMethodParams;
+  auto subMap =
+    SubstitutionMap::combineSubstitutionMaps(baseSubMap,
+                                             origSubMap,
+                                             CombineSubstitutionMaps::AtDepth,
+                                             baseDepth,
+                                             origDepth,
+                                             baseCalleeSig);
 
-  if (ClassSubs.size() == NumSubs)
-    return ClassSubs;
-
-  // Mix class subs with method specific subs from the AI substitutions.
-
-  // Assumptions: AI substitutions contain first the substitutions for
-  // a class of the method being invoked and then the substitutions
-  // for a method being invoked.
-  auto Subs = M.getASTContext().Allocate<Substitution>(NumSubs);
-
-  unsigned i = 0;
-  for (auto &S : ClassSubs) {
-    Subs[i++] = S;
-  }
-
-  for (; i < NumSubs; ++i, ++NextMethodParamIdx) {
-    Subs[i] = AISubs[NextMethodParamIdx];
-  }
-
-  return Subs;
+  // Build the new substitutions using the base method signature.
+  baseCalleeSig->getSubstitutions(subMap, newSubs);
 }
 
 SILFunction *swift::getTargetClassMethod(SILModule &M,
@@ -466,6 +506,7 @@ SILFunction *swift::getTargetClassMethod(SILModule &M,
 /// return true if it is possible to devirtualize, false - otherwise.
 bool swift::canDevirtualizeClassMethod(FullApplySite AI,
                                        SILType ClassOrMetatypeType) {
+
   DEBUG(llvm::dbgs() << "    Trying to devirtualize : " << *AI.getInstruction());
 
   SILModule &Mod = AI.getModule();
@@ -495,53 +536,17 @@ bool swift::canDevirtualizeClassMethod(FullApplySite AI,
     return false;
   }
 
-  if (AI.getFunction()->isFragile()) {
+  if (AI.getFunction()->isSerialized()) {
     // function_ref inside fragile function cannot reference a private or
     // hidden symbol.
     if (!F->hasValidLinkageForFragileRef())
       return false;
   }
 
-  // Type of the actual function to be called.
-  CanSILFunctionType GenCalleeType = F->getLoweredFunctionType();
-
-  // Type of the actual function to be called with substitutions applied.
-  CanSILFunctionType SubstCalleeType = GenCalleeType;
-
-  // For polymorphic functions, bail if the number of substitutions is
-  // not the same as the number of expected generic parameters.
-  if (GenCalleeType->isPolymorphic()) {
-    // First, find proper list of substitutions for the concrete
-    // method to be called.
-    auto Subs = getSubstitutionsForCallee(Mod, GenCalleeType,
-                                          ClassOrMetatypeType, AI);
-
-    auto GenericSig = GenCalleeType->getGenericSignature();
-    // Get the number of expected generic parameters, which
-    // is a sum of the number of explicit generic parameters
-    // and the number of their recursive member types exposed
-    // through protocol requirements.
-    auto DepTypes = GenericSig->getAllDependentTypes();
-    unsigned ExpectedSubsNum = 0;
-
-    for (auto DT: DepTypes) {
-      (void)DT;
-      ExpectedSubsNum++;
-    }
-
-    if (ExpectedSubsNum != Subs.size()) {
-      return false;
-    }
-
-    SubstCalleeType =
-        GenCalleeType->substGenericArgs(Mod, Mod.getSwiftModule(), Subs);
+  if (MI->isVolatile()) {
+    // dynamic dispatch is semantically required, can't devirtualize
+    return false;
   }
-
-  // Check if the optimizer knows how to cast the return type.
-  SILType ReturnType = SubstCalleeType->getSILResult();
-
-  if (!canCastValueToABICompatibleType(Mod, ReturnType, AI.getType()))
-      return false;
 
   return true;
 }
@@ -563,11 +568,14 @@ DevirtualizationResult swift::devirtualizeClassMethod(FullApplySite AI,
 
   CanSILFunctionType GenCalleeType = F->getLoweredFunctionType();
 
-  auto Subs = getSubstitutionsForCallee(Mod, GenCalleeType,
-                                        ClassOrMetatypeType, AI);
+  SmallVector<Substitution, 4> Subs;
+  getSubstitutionsForCallee(Mod, GenCalleeType,
+                            ClassOrMetatypeType.getSwiftRValueType(),
+                            AI, Subs);
   CanSILFunctionType SubstCalleeType = GenCalleeType;
   if (GenCalleeType->isPolymorphic())
-    SubstCalleeType = GenCalleeType->substGenericArgs(Mod, Mod.getSwiftModule(), Subs);
+    SubstCalleeType = GenCalleeType->substGenericArgs(Mod, Subs);
+  SILFunctionConventions substConv(SubstCalleeType, Mod);
 
   SILBuilderWithScope B(AI.getInstruction());
   FunctionRefInst *FRI = B.createFunctionRef(AI.getLoc(), F);
@@ -577,33 +585,34 @@ DevirtualizationResult swift::devirtualizeClassMethod(FullApplySite AI,
   // contravariant argument types.
   llvm::SmallVector<SILValue, 8> NewArgs;
 
-  auto IndirectResultArgs = AI.getIndirectResults();
-  auto IndirectResultInfos = SubstCalleeType->getIndirectResults();
-  for (unsigned i : indices(IndirectResultArgs))
-    NewArgs.push_back(castValueToABICompatibleType(&B, AI.getLoc(),
-                              IndirectResultArgs[i],
-                              IndirectResultArgs[i]->getType(),
-                              IndirectResultInfos[i].getSILType()).getValue());
+  auto IndirectResultArgIter = AI.getIndirectSILResults().begin();
+  for (auto ResultTy : substConv.getIndirectSILResultTypes()) {
+    NewArgs.push_back(
+        castValueToABICompatibleType(&B, AI.getLoc(), *IndirectResultArgIter,
+                                     IndirectResultArgIter->getType(), ResultTy));
+    ++IndirectResultArgIter;
+  }
 
-  auto Args = AI.getArgumentsWithoutIndirectResults();
-  auto ParamTypes = SubstCalleeType->getParameterSILTypes();
-  for (unsigned i = 0, e = Args.size() - 1; i != e; ++i)
-    NewArgs.push_back(castValueToABICompatibleType(&B, AI.getLoc(), Args[i],
-                                                   Args[i]->getType(),
-                                                   ParamTypes[i]).getValue());
+  auto ParamArgIter = AI.getArgumentsWithoutIndirectResults().begin();
+  // Skip the last parameter, which is `self`. Add it below.
+  for (auto param : substConv.getParameters().drop_back()) {
+    auto paramType = substConv.getSILType(param);
+    NewArgs.push_back(
+        castValueToABICompatibleType(&B, AI.getLoc(), *ParamArgIter,
+                                     ParamArgIter->getType(), paramType));
+    ++ParamArgIter;
+  }
 
   // Add the self argument, upcasting if required because we're
   // calling a base class's method.
-  auto SelfParamTy = SubstCalleeType->getSelfParameter().getSILType();
+  auto SelfParamTy = substConv.getSILType(SubstCalleeType->getSelfParameter());
   NewArgs.push_back(castValueToABICompatibleType(&B, AI.getLoc(),
                                                  ClassOrMetatype,
                                                  ClassOrMetatypeType,
-                                                 SelfParamTy).getValue());
+                                                 SelfParamTy));
 
-  SILType ResultTy = SubstCalleeType->getSILResult();
+  SILType ResultTy = substConv.getSILResultType();
 
-  SILType SubstCalleeSILType =
-    SILType::getPrimitiveObjectType(SubstCalleeType);
   FullApplySite NewAI;
 
   SILBasicBlock *ResultBB = nullptr;
@@ -613,8 +622,8 @@ DevirtualizationResult swift::devirtualizeClassMethod(FullApplySite AI,
   SmallVector<Operand *, 4> OriginalResultUses;
 
   if (!isa<TryApplyInst>(AI)) {
-    NewAI = B.createApply(AI.getLoc(), FRI, SubstCalleeSILType, ResultTy,
-                          Subs, NewArgs, cast<ApplyInst>(AI)->isNonThrowing());
+    NewAI = B.createApply(AI.getLoc(), FRI, Subs, NewArgs,
+                          cast<ApplyInst>(AI)->isNonThrowing());
     ResultValue = NewAI.getInstruction();
   } else {
     auto *TAI = cast<TryApplyInst>(AI);
@@ -622,54 +631,54 @@ DevirtualizationResult swift::devirtualizeClassMethod(FullApplySite AI,
     // - re-using a BB would create a critical edge
     // - or, the result of the new apply would be of different
     //   type than the argument of the original normal BB.
-    if (TAI->getNormalBB()->getSinglePredecessor())
+    if (TAI->getNormalBB()->getSinglePredecessorBlock())
       ResultBB = TAI->getNormalBB();
     else {
       ResultBB = B.getFunction().createBasicBlock();
-      ResultBB->createBBArg(ResultTy);
+      ResultBB->createPHIArgument(ResultTy, ValueOwnershipKind::Owned);
     }
 
     NormalBB = TAI->getNormalBB();
 
     SILBasicBlock *ErrorBB = nullptr;
-    if (TAI->getErrorBB()->getSinglePredecessor())
+    if (TAI->getErrorBB()->getSinglePredecessorBlock())
       ErrorBB = TAI->getErrorBB();
     else {
       ErrorBB = B.getFunction().createBasicBlock();
-      ErrorBB->createBBArg(TAI->getErrorBB()->getBBArg(0)->getType());
+      ErrorBB->createPHIArgument(TAI->getErrorBB()->getArgument(0)->getType(),
+                                 ValueOwnershipKind::Owned);
     }
 
-    NewAI = B.createTryApply(AI.getLoc(), FRI, SubstCalleeSILType,
-                             Subs, NewArgs,
-                             ResultBB, ErrorBB);
+    NewAI = B.createTryApply(AI.getLoc(), FRI, Subs, NewArgs, ResultBB, ErrorBB);
     if (ErrorBB != TAI->getErrorBB()) {
       B.setInsertionPoint(ErrorBB);
       B.createBranch(TAI->getLoc(), TAI->getErrorBB(),
-                     {ErrorBB->getBBArg(0)});
+                     {ErrorBB->getArgument(0)});
     }
 
     // Does the result value need to be casted?
-    ResultCastRequired = ResultTy != NormalBB->getBBArg(0)->getType();
+    ResultCastRequired = ResultTy != NormalBB->getArgument(0)->getType();
 
     if (ResultBB != NormalBB)
       B.setInsertionPoint(ResultBB);
     else if (ResultCastRequired) {
       B.setInsertionPoint(NormalBB->begin());
       // Collect all uses, before casting.
-      for (auto *Use : NormalBB->getBBArg(0)->getUses()) {
+      for (auto *Use : NormalBB->getArgument(0)->getUses()) {
         OriginalResultUses.push_back(Use);
       }
-      NormalBB->getBBArg(0)->replaceAllUsesWith(SILUndef::get(AI.getType(), Mod));
-      NormalBB->replaceBBArg(0, ResultTy, nullptr);
+      NormalBB->getArgument(0)->replaceAllUsesWith(
+          SILUndef::get(AI.getType(), Mod));
+      NormalBB->replacePHIArgument(0, ResultTy, ValueOwnershipKind::Owned);
     }
 
     // The result value is passed as a parameter to the normal block.
-    ResultValue = ResultBB->getBBArg(0);
+    ResultValue = ResultBB->getArgument(0);
   }
 
   // Check if any casting is required for the return value.
   ResultValue = castValueToABICompatibleType(&B, NewAI.getLoc(), ResultValue,
-                                             ResultTy, AI.getType()).getValue();
+                                             ResultTy, AI.getType());
 
   DEBUG(llvm::dbgs() << "        SUCCESS: " << F->getName() << "\n");
   NumClassDevirt++;
@@ -708,66 +717,128 @@ DevirtualizationResult swift::tryDevirtualizeClassMethod(FullApplySite AI,
 //                        Witness Method Optimization
 //===----------------------------------------------------------------------===//
 
-static void getWitnessMethodSubstitutions(ApplySite AI, SILFunction *F,
-                                          ArrayRef<Substitution> Subs,
-                                          SmallVectorImpl<Substitution> &NewSubs) {
-  auto &Module = AI.getModule();
+static SubstitutionMap
+getSubstitutionsForProtocolConformance(ProtocolConformanceRef CRef) {
+  auto C = CRef.getConcrete();
 
-  auto CalleeCanType = F->getLoweredFunctionType();
-
-  ProtocolDecl *proto = nullptr;
-  if (CalleeCanType->getRepresentation() ==
-      SILFunctionTypeRepresentation::WitnessMethod) {
-    proto = CalleeCanType->getDefaultWitnessMethodProtocol(
-        *Module.getSwiftModule());
-  }
-
-  ArrayRef<Substitution> origSubs = AI.getSubstitutions();
-
-  if (proto != nullptr) {
-    // If the callee is a default witness method thunk, preserve substitutions
-    // from the call site.
-    NewSubs.append(origSubs.begin(), origSubs.end());
-    return;
-  }
-
-  // If the callee is a concrete witness method thunk, apply substitutions
-  // from the conformance, and drop any substitutions derived from the Self
-  // type.
-  NewSubs.append(Subs.begin(), Subs.end());
-
-  if (auto generics = AI.getOrigCalleeType()->getGenericSignature()) {
-    for (auto genericParam : generics->getAllDependentTypes()) {
-      auto origSub = origSubs.front();
-      origSubs = origSubs.slice(1);
-
-      // If the callee is a concrete witness method thunk, we ignore
-      // generic parameters derived from 'self', the generic parameter at
-      // depth 0, index 0.
-      auto type = genericParam->getCanonicalType();
-      while (auto memberType = dyn_cast<DependentMemberType>(type)) {
-        type = memberType.getBase();
-      }
-      auto paramType = cast<GenericTypeParamType>(type);
-      if (paramType->getDepth() == 0) {
-        // There shouldn't be any other parameters at this depth.
-        assert(paramType->getIndex() == 0);
-        continue;
-      }
-
-      // Okay, remember this substitution.
-      NewSubs.push_back(origSub);
+  // Walk down to the base NormalProtocolConformance.
+  SubstitutionList Subs;
+  const ProtocolConformance *ParentC = C;
+  while (!isa<NormalProtocolConformance>(ParentC)) {
+    switch (ParentC->getKind()) {
+    case ProtocolConformanceKind::Normal:
+      llvm_unreachable("should have exited the loop?!");
+    case ProtocolConformanceKind::Inherited:
+      ParentC = cast<InheritedProtocolConformance>(ParentC)
+        ->getInheritedConformance();
+      break;
+    case ProtocolConformanceKind::Specialized: {
+      auto SC = cast<SpecializedProtocolConformance>(ParentC);
+      ParentC = SC->getGenericConformance();
+      assert(Subs.empty() && "multiple conformance specializations?!");
+      Subs = SC->getGenericSubstitutions();
+      break;
+    }
     }
   }
+  const NormalProtocolConformance *NormalC
+    = cast<NormalProtocolConformance>(ParentC);
 
-  assert(origSubs.empty() && "subs not parallel to dependent types");
+  // If the normal conformance is for a generic type, and we didn't hit a
+  // specialized conformance, collect the substitutions from the generic type.
+  // FIXME: The AST should do this for us.
+  if (!NormalC->getType()->isSpecialized())
+    return SubstitutionMap();
+
+  if (Subs.empty()) {
+    auto *DC = NormalC->getDeclContext();
+    return NormalC->getType()
+      ->getContextSubstitutionMap(DC->getParentModule(), DC);
+  }
+
+  return NormalC->getGenericSignature()->getSubstitutionMap(Subs);
+}
+
+/// Compute substitutions for making a direct call to a SIL function with
+/// @convention(witness_method) convention.
+///
+/// Such functions have a substituted generic signature where the
+/// abstract `Self` parameter from the original type of the protocol
+/// requirement is replaced by a concrete type.
+///
+/// Thus, the original substitutions of the apply instruction that
+/// are written in terms of the requirement's generic signature need
+/// to be remapped to substitutions suitable for the witness signature.
+///
+/// \param conformanceRef The (possibly-specialized) conformance
+/// \param requirementSig The generic signature of the requirement
+/// \param witnessThunkSig The generic signature of the witness method
+/// \param origSubs The substitutions from the call instruction
+static SubstitutionMap
+getWitnessMethodSubstitutions(
+    ProtocolConformanceRef conformanceRef,
+    GenericSignature *requirementSig,
+    GenericSignature *witnessThunkSig,
+    SubstitutionList origSubs,
+    bool isDefaultWitness) {
+
+  if (witnessThunkSig == nullptr)
+    return SubstitutionMap();
+
+  auto origSubMap = requirementSig->getSubstitutionMap(origSubs);
+
+  if (isDefaultWitness)
+    return origSubMap;
+
+  assert(!conformanceRef.isAbstract());
+  auto conformance = conformanceRef.getConcrete();
+
+  // If `Self` maps to a bound generic type, this gives us the
+  // substitutions for the concrete type's generic parameters.
+  auto baseSubMap = getSubstitutionsForProtocolConformance(conformanceRef);
+
+  unsigned baseDepth = 0;
+  auto *rootConformance = conformance->getRootNormalConformance();
+  if (auto *witnessSig = rootConformance->getGenericSignature())
+    baseDepth = witnessSig->getGenericParams().back()->getDepth() + 1;
+
+  auto origDepth = 1;
+
+  return SubstitutionMap::combineSubstitutionMaps(
+      baseSubMap,
+      origSubMap,
+      CombineSubstitutionMaps::AtDepth,
+      baseDepth,
+      origDepth,
+      witnessThunkSig);
+}
+
+static SubstitutionMap
+getWitnessMethodSubstitutions(SILModule &Module, ApplySite AI, SILFunction *F,
+                              ProtocolConformanceRef CRef) {
+  auto requirementSig = AI.getOrigCalleeType()->getGenericSignature();
+  auto witnessThunkSig = F->getLoweredFunctionType()->getGenericSignature();
+
+  SubstitutionList origSubs = AI.getSubstitutions();
+
+  bool isDefaultWitness =
+    F->getLoweredFunctionType()->getRepresentation()
+      == SILFunctionTypeRepresentation::WitnessMethod &&
+    F->getLoweredFunctionType()->getDefaultWitnessMethodProtocol(
+                                                     *Module.getSwiftModule())
+      == CRef.getRequirement();
+
+  return getWitnessMethodSubstitutions(
+      CRef, requirementSig, witnessThunkSig,
+      origSubs, isDefaultWitness);
 }
 
 /// Generate a new apply of a function_ref to replace an apply of a
 /// witness_method when we've determined the actual function we'll end
 /// up calling.
-static ApplySite devirtualizeWitnessMethod(ApplySite AI, SILFunction *F,
-                                           ArrayRef<Substitution> Subs) {
+static DevirtualizationResult
+devirtualizeWitnessMethod(ApplySite AI, SILFunction *F,
+                          ProtocolConformanceRef C) {
   // We know the witness thunk and the corresponding set of substitutions
   // required to invoke the protocol method at this point.
   auto &Module = AI.getModule();
@@ -777,15 +848,12 @@ static ApplySite devirtualizeWitnessMethod(ApplySite AI, SILFunction *F,
   // The complete set of substitutions may be different, e.g. because the found
   // witness thunk F may have been created by a specialization pass and have
   // additional generic parameters.
-  SmallVector<Substitution, 4> NewSubs;
-
-  getWitnessMethodSubstitutions(AI, F, Subs, NewSubs);
+  auto SubMap = getWitnessMethodSubstitutions(Module, AI, F, C);
 
   // Figure out the exact bound type of the function to be called by
   // applying all substitutions.
   auto CalleeCanType = F->getLoweredFunctionType();
-  auto SubstCalleeCanType = CalleeCanType->substGenericArgs(
-    Module, Module.getSwiftModule(), NewSubs);
+  auto SubstCalleeCanType = CalleeCanType->substGenericArgs(Module, SubMap);
 
   // Collect arguments from the apply instruction.
   auto Arguments = SmallVector<SILValue, 4>();
@@ -793,15 +861,16 @@ static ApplySite devirtualizeWitnessMethod(ApplySite AI, SILFunction *F,
   // Iterate over the non self arguments and add them to the
   // new argument list, upcasting when required.
   SILBuilderWithScope B(AI.getInstruction());
-  for (unsigned ArgN = 0, ArgE = AI.getNumArguments(); ArgN != ArgE; ++ArgN) {
-    SILValue A = AI.getArgument(ArgN);
-    auto ParamType = SubstCalleeCanType->getSILArgumentType(
-      SubstCalleeCanType->getNumSILArguments() - AI.getNumArguments() + ArgN);
-    if (A->getType() != ParamType)
-      A = B.createUpcast(AI.getLoc(), A, ParamType);
-
-    Arguments.push_back(A);
+  SILFunctionConventions substConv(SubstCalleeCanType, Module);
+  unsigned substArgIdx = AI.getCalleeArgIndexOfFirstAppliedArg();
+  for (auto arg : AI.getArguments()) {
+    auto paramType = substConv.getSILArgumentType(substArgIdx++);
+    if (arg->getType() != paramType)
+      arg = castValueToABICompatibleType(&B, AI.getLoc(), arg,
+                                         arg->getType(), paramType);
+    Arguments.push_back(arg);
   }
+  assert(substArgIdx == substConv.getNumSILArguments());
 
   // Replace old apply instruction by a new apply instruction that invokes
   // the witness thunk.
@@ -809,52 +878,81 @@ static ApplySite devirtualizeWitnessMethod(ApplySite AI, SILFunction *F,
   SILLocation Loc = AI.getLoc();
   FunctionRefInst *FRI = Builder.createFunctionRef(Loc, F);
 
-  auto SubstCalleeSILType = SILType::getPrimitiveObjectType(SubstCalleeCanType);
-  auto ResultSILType = SubstCalleeCanType->getSILResult();
   ApplySite SAI;
 
-  if (auto *A = dyn_cast<ApplyInst>(AI))
-    SAI = Builder.createApply(Loc, FRI, SubstCalleeSILType,
-                              ResultSILType, NewSubs, Arguments,
-                              A->isNonThrowing());
+  SmallVector<Substitution, 4> NewSubs;
+  if (auto GenericSig = CalleeCanType->getGenericSignature())
+    GenericSig->getSubstitutions(SubMap, NewSubs);
+
+  SILValue ResultValue;
+  if (auto *A = dyn_cast<ApplyInst>(AI)) {
+    auto *NewAI = Builder.createApply(Loc, FRI, NewSubs, Arguments,
+                                      A->isNonThrowing());
+    // Check if any casting is required for the return value.
+    ResultValue = castValueToABICompatibleType(&Builder, Loc, NewAI,
+                                               NewAI->getType(), AI.getType());
+    SAI = ApplySite::isa(NewAI);
+  }
   if (auto *TAI = dyn_cast<TryApplyInst>(AI))
-    SAI = Builder.createTryApply(Loc, FRI, SubstCalleeSILType,
-                                 NewSubs, Arguments,
+    SAI = Builder.createTryApply(Loc, FRI, NewSubs, Arguments,
                                  TAI->getNormalBB(), TAI->getErrorBB());
-  if (auto *PAI = dyn_cast<PartialApplyInst>(AI))
-    SAI = Builder.createPartialApply(Loc, FRI, SubstCalleeSILType,
-                                     NewSubs, Arguments, PAI->getType());
+  if (auto *PAI = dyn_cast<PartialApplyInst>(AI)) {
+    auto PartialApplyConvention = PAI->getType()
+                                      .getSwiftRValueType()
+                                      ->getAs<SILFunctionType>()
+                                      ->getCalleeConvention();
+    auto *NewPAI = Builder.createPartialApply(
+        Loc, FRI, NewSubs, Arguments, PartialApplyConvention);
+    // Check if any casting is required for the return value.
+    ResultValue = castValueToABICompatibleType(
+        &Builder, Loc, NewPAI, NewPAI->getType(), PAI->getType());
+    SAI = ApplySite::isa(NewPAI);
+  }
 
   NumWitnessDevirt++;
-  return SAI;
+  return std::make_pair(ResultValue, SAI);
+}
+
+static bool canDevirtualizeWitnessMethod(ApplySite AI) {
+  SILFunction *F;
+  SILWitnessTable *WT;
+
+  auto *WMI = cast<WitnessMethodInst>(AI.getCallee());
+
+  std::tie(F, WT) =
+    AI.getModule().lookUpFunctionInWitnessTable(WMI->getConformance(),
+                                                WMI->getMember());
+
+  if (!F)
+    return false;
+
+  if (AI.getFunction()->isSerialized()) {
+    // function_ref inside fragile function cannot reference a private or
+    // hidden symbol.
+    if (!F->hasValidLinkageForFragileRef())
+      return false;
+  }
+
+  return true;
 }
 
 /// In the cases where we can statically determine the function that
 /// we'll call to, replace an apply of a witness_method with an apply
 /// of a function_ref, returning the new apply.
 DevirtualizationResult swift::tryDevirtualizeWitnessMethod(ApplySite AI) {
+  if (!canDevirtualizeWitnessMethod(AI))
+    return std::make_pair(nullptr, FullApplySite());
+
   SILFunction *F;
-  ArrayRef<Substitution> Subs;
   SILWitnessTable *WT;
 
   auto *WMI = cast<WitnessMethodInst>(AI.getCallee());
 
-  std::tie(F, WT, Subs) =
+  std::tie(F, WT) =
     AI.getModule().lookUpFunctionInWitnessTable(WMI->getConformance(),
                                                 WMI->getMember());
 
-  if (!F)
-    return std::make_pair(nullptr, FullApplySite());
-
-  if (AI.getFunction()->isFragile()) {
-    // function_ref inside fragile function cannot reference a private or
-    // hidden symbol.
-    if (!F->hasValidLinkageForFragileRef())
-      return std::make_pair(nullptr, FullApplySite());
-  }
-
-  auto Result = devirtualizeWitnessMethod(AI, F, Subs);
-  return std::make_pair(Result.getInstruction(), Result);
+  return devirtualizeWitnessMethod(AI, F, WMI->getConformance());
 }
 
 //===----------------------------------------------------------------------===//
@@ -864,7 +962,7 @@ DevirtualizationResult swift::tryDevirtualizeWitnessMethod(ApplySite AI) {
 /// Attempt to devirtualize the given apply if possible, and return a
 /// new instruction in that case, or nullptr otherwise.
 DevirtualizationResult
-swift::tryDevirtualizeApply(FullApplySite AI, ClassHierarchyAnalysis *CHA) {
+swift::tryDevirtualizeApply(ApplySite AI, ClassHierarchyAnalysis *CHA) {
   DEBUG(llvm::dbgs() << "    Trying to devirtualize: " << *AI.getInstruction());
 
   // Devirtualize apply instructions that call witness_method instructions:
@@ -874,6 +972,77 @@ swift::tryDevirtualizeApply(FullApplySite AI, ClassHierarchyAnalysis *CHA) {
   //
   if (isa<WitnessMethodInst>(AI.getCallee()))
     return tryDevirtualizeWitnessMethod(AI);
+
+  // TODO: check if we can also de-virtualize partial applies of class methods.
+  FullApplySite FAS = FullApplySite::isa(AI.getInstruction());
+  if (!FAS)
+    return std::make_pair(nullptr, ApplySite());
+
+  /// Optimize a class_method and alloc_ref pair into a direct function
+  /// reference:
+  ///
+  /// \code
+  /// %XX = alloc_ref $Foo
+  /// %YY = class_method %XX : $Foo, #Foo.get!1 : $@convention(method)...
+  /// \endcode
+  ///
+  ///  or
+  ///
+  /// %XX = metatype $...
+  /// %YY = class_method %XX : ...
+  ///
+  ///  into
+  ///
+  /// %YY = function_ref @...
+  if (auto *CMI = dyn_cast<ClassMethodInst>(FAS.getCallee())) {
+    auto &M = FAS.getModule();
+    auto Instance = stripUpCasts(CMI->getOperand());
+    auto ClassType = Instance->getType();
+    if (ClassType.is<MetatypeType>())
+      ClassType = ClassType.getMetatypeInstanceType(M);
+
+    auto *CD = ClassType.getClassOrBoundGenericClass();
+
+    if (isEffectivelyFinalMethod(FAS, ClassType, CD, CHA))
+      return tryDevirtualizeClassMethod(FAS, Instance);
+
+    // Try to check if the exact dynamic type of the instance is statically
+    // known.
+    if (auto Instance = getInstanceWithExactDynamicType(CMI->getOperand(),
+                                                        CMI->getModule(),
+                                                        CHA))
+      return tryDevirtualizeClassMethod(FAS, Instance);
+
+    if (auto ExactTy = getExactDynamicType(CMI->getOperand(), CMI->getModule(),
+                                           CHA)) {
+      if (ExactTy == CMI->getOperand()->getType())
+        return tryDevirtualizeClassMethod(FAS, CMI->getOperand());
+    }
+  }
+
+  if (isa<SuperMethodInst>(FAS.getCallee())) {
+    if (FAS.hasSelfArgument()) {
+      return tryDevirtualizeClassMethod(FAS, FAS.getSelfArgument());
+    }
+
+    // It is an invocation of a class method.
+    // Last operand is the metatype that should be used for dispatching.
+    return tryDevirtualizeClassMethod(FAS, FAS.getArguments().back());
+  }
+
+  return std::make_pair(nullptr, ApplySite());
+}
+
+bool swift::canDevirtualizeApply(FullApplySite AI, ClassHierarchyAnalysis *CHA) {
+  DEBUG(llvm::dbgs() << "    Trying to devirtualize: " << *AI.getInstruction());
+
+  // Devirtualize apply instructions that call witness_method instructions:
+  //
+  //   %8 = witness_method $Optional<UInt16>, #LogicValue.boolValue!getter.1
+  //   %9 = apply %8<Self = CodeUnit?>(%6#1) : ...
+  //
+  if (isa<WitnessMethodInst>(AI.getCallee()))
+    return canDevirtualizeWitnessMethod(AI);
 
   /// Optimize a class_method and alloc_ref pair into a direct function
   /// reference:
@@ -901,25 +1070,31 @@ swift::tryDevirtualizeApply(FullApplySite AI, ClassHierarchyAnalysis *CHA) {
     auto *CD = ClassType.getClassOrBoundGenericClass();
 
     if (isEffectivelyFinalMethod(AI, ClassType, CD, CHA))
-      return tryDevirtualizeClassMethod(AI, Instance);
+      return canDevirtualizeClassMethod(AI, Instance->getType());
 
     // Try to check if the exact dynamic type of the instance is statically
     // known.
     if (auto Instance = getInstanceWithExactDynamicType(CMI->getOperand(),
                                                         CMI->getModule(),
                                                         CHA))
-      return tryDevirtualizeClassMethod(AI, Instance);
+      return canDevirtualizeClassMethod(AI, Instance->getType());
+
+    if (auto ExactTy = getExactDynamicType(CMI->getOperand(), CMI->getModule(),
+                                           CHA)) {
+      if (ExactTy == CMI->getOperand()->getType())
+        return canDevirtualizeClassMethod(AI, CMI->getOperand()->getType());
+    }
   }
 
   if (isa<SuperMethodInst>(AI.getCallee())) {
     if (AI.hasSelfArgument()) {
-      return tryDevirtualizeClassMethod(AI, AI.getSelfArgument());
+      return canDevirtualizeClassMethod(AI, AI.getSelfArgument()->getType());
     }
 
     // It is an invocation of a class method.
     // Last operand is the metatype that should be used for dispatching.
-    return tryDevirtualizeClassMethod(AI, AI.getArguments().back());
+    return canDevirtualizeClassMethod(AI, AI.getArguments().back()->getType());
   }
 
-  return std::make_pair(nullptr, FullApplySite());
+  return false;
 }

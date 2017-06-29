@@ -2,16 +2,20 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 import Foundation
 @_exported import UIKit
+
+#if os(iOS) || os(tvOS)
+import _SwiftUIKitOverlayShims
+#endif
 
 //===----------------------------------------------------------------------===//
 // UIGeometry
@@ -36,7 +40,6 @@ public extension UIOffset {
 //===----------------------------------------------------------------------===//
 
 @_transparent // @fragile
-@warn_unused_result
 public func == (lhs: UIEdgeInsets, rhs: UIEdgeInsets) -> Bool {
   return lhs.top == rhs.top &&
          lhs.left == rhs.left &&
@@ -47,7 +50,6 @@ public func == (lhs: UIEdgeInsets, rhs: UIEdgeInsets) -> Bool {
 extension UIEdgeInsets : Equatable {}
 
 @_transparent // @fragile
-@warn_unused_result
 public func == (lhs: UIOffset, rhs: UIOffset) -> Bool {
   return lhs.horizontal == rhs.horizontal &&
          lhs.vertical == rhs.vertical
@@ -76,7 +78,7 @@ public extension UIDeviceOrientation {
   }
 
   var isValidInterfaceOrientation: Bool {
-    switch (self) {
+    switch self {
     case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
       return true
     default:
@@ -85,21 +87,18 @@ public extension UIDeviceOrientation {
   }
 }
 
-@warn_unused_result
 public func UIDeviceOrientationIsLandscape(
   _ orientation: UIDeviceOrientation
 ) -> Bool {
   return orientation.isLandscape
 }
 
-@warn_unused_result
 public func UIDeviceOrientationIsPortrait(
   _ orientation: UIDeviceOrientation
 ) -> Bool {
   return orientation.isPortrait
 }
 
-@warn_unused_result
 public func UIDeviceOrientationIsValidInterfaceOrientation(
   _ orientation: UIDeviceOrientation) -> Bool
 {
@@ -122,13 +121,11 @@ public extension UIInterfaceOrientation {
   }
 }
 
-@warn_unused_result
 public func UIInterfaceOrientationIsPortrait(
   _ orientation: UIInterfaceOrientation) -> Bool {
   return orientation.isPortrait
 }
 
-@warn_unused_result
 public func UIInterfaceOrientationIsLandscape(
   _ orientation: UIInterfaceOrientation
 ) -> Bool {
@@ -218,7 +215,7 @@ extension UIView : _DefaultCustomPlaygroundQuickLookable {
 }
 #endif
 
-extension UIColor : _ColorLiteralConvertible {
+extension UIColor : _ExpressibleByColorLiteral {
   @nonobjc public required convenience init(colorLiteralRed red: Float,
                                             green: Float,
                                             blue: Float, alpha: Float) {
@@ -229,7 +226,7 @@ extension UIColor : _ColorLiteralConvertible {
 
 public typealias _ColorLiteralType = UIColor
 
-extension UIImage : _ImageLiteralConvertible {
+extension UIImage : _ExpressibleByImageLiteral {
   private convenience init!(failableImageLiteral name: String) {
     self.init(named: name)
   }
@@ -240,3 +237,61 @@ extension UIImage : _ImageLiteralConvertible {
 }
 
 public typealias _ImageLiteralType = UIImage
+
+extension UIFontTextStyle {
+    @available(iOS 11.0, watchOS 4.0, tvOS 11.0, *)
+    public var metrics: UIFontMetrics {
+        return UIFontMetrics(forTextStyle: self)
+    }
+}
+
+#if !os(watchOS) // UIContentSizeCategory not available on watchOS
+extension UIContentSizeCategory {
+    @available(iOS 11.0, tvOS 11.0,  *)
+    public var isAccessibilityCategory: Bool {
+        return __UIContentSizeCategoryIsAccessibilityCategory(self)
+    }
+    
+    @available(iOS 11.0, tvOS 11.0, *)
+    public static func < (left: UIContentSizeCategory, right: UIContentSizeCategory) -> Bool {
+        return __UIContentSizeCategoryCompareToCategory(left, right) == .orderedAscending
+    }
+    
+    @available(iOS 11.0, tvOS 11.0, *)
+    public static func <= (left: UIContentSizeCategory, right: UIContentSizeCategory) -> Bool {
+        return __UIContentSizeCategoryCompareToCategory(left, right) != .orderedDescending
+    }
+    
+    @available(iOS 11.0, tvOS 11.0, *)
+    public static func > (left: UIContentSizeCategory, right: UIContentSizeCategory) -> Bool {
+        return __UIContentSizeCategoryCompareToCategory(left, right) == .orderedDescending
+    }
+    
+    @available(iOS 11.0, tvOS 11.0, *)
+    public static func >= (left: UIContentSizeCategory, right: UIContentSizeCategory) -> Bool {
+        return __UIContentSizeCategoryCompareToCategory(left, right) != .orderedAscending
+    }
+}
+#endif
+
+//===----------------------------------------------------------------------===//
+// Focus
+//===----------------------------------------------------------------------===//
+
+#if os(iOS) || os(tvOS)
+@available(iOS 11.0, tvOS 11.0, *)
+extension UIFocusEnvironment {
+  @available(iOS 11.0, tvOS 11.0, *)
+  public func contains(_ environment: UIFocusEnvironment) -> Bool {
+    return _swift_UIKit_UIFocusEnvironmentContainsEnvironment(self, environment)
+  }
+}
+
+@available(iOS 11.0, tvOS 11.0, *)
+extension UIFocusItem {
+  @available(iOS 11.0, tvOS 11.0, *)
+  public var isFocused: Bool {
+    return self === UIScreen.main.focusedItem
+  }
+}
+#endif

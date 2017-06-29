@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 // Test "near misses" where a member of a class or extension thereof
 // nearly matches an optional requirement, but does not exactly match.
@@ -10,7 +10,7 @@
 class C1a : P1 {
   @objc func doSomething(a: Int, c: Double) { }
   // expected-warning@-1{{instance method 'doSomething(a:c:)' nearly matches optional requirement 'doSomething(a:b:)' of protocol 'P1'}}
-  // expected-note@-2{{rename to 'doSomething(a:b:)' to satisfy this requirement}}{{34-34=b }}{{8-8=(doSomethingWithA:b:)}}
+  // expected-note@-2{{rename to 'doSomething(a:b:)' to satisfy this requirement}}{{34-34=b }}{{none}}
   // expected-note@-3{{move 'doSomething(a:c:)' to an extension to silence this warning}}
   // expected-note@-4{{make 'doSomething(a:c:)' private to silence this warning}}{{9-9=private }}
 }
@@ -28,7 +28,7 @@ class C1c {
 extension C1c : P1 {
   func doSomething(a: Int, c: Double) { }
   // expected-warning@-1{{instance method 'doSomething(a:c:)' nearly matches optional requirement 'doSomething(a:b:)' of protocol 'P1'}}
-  // expected-note@-2{{rename to 'doSomething(a:b:)' to satisfy this requirement}}{{28-28=b }}{{3-3=@objc(doSomethingWithA:b:) }}
+  // expected-note@-2{{rename to 'doSomething(a:b:)' to satisfy this requirement}}{{28-28=b }}{{none}}
   // expected-note@-3{{move 'doSomething(a:c:)' to another extension to silence this warning}}
   // expected-note@-4{{make 'doSomething(a:c:)' private to silence this warning}}{{3-3=private }}
 }
@@ -87,7 +87,7 @@ class C4a : P4 {
 class C5a : P5 {
   func method(_: Int, for someClass: SomeClass, dividing double: Double) { }
   // expected-warning@-1{{instance method 'method(_:for:dividing:)' nearly matches optional requirement 'methodWithInt(_:forSomeClass:dividingDouble:)' of protocol 'P5'}}
-  // expected-note@-2{{rename to 'methodWithInt(_:forSomeClass:dividingDouble:)' to satisfy this requirement}}{{3-3=@objc(methodWithInt:forSomeClass:dividingDouble:) }}{{8-14=methodWithInt}}{{23-26=forSomeClass}}{{49-57=dividingDouble}}
+  // expected-note@-2{{rename to 'methodWithInt(_:forSomeClass:dividingDouble:)' to satisfy this requirement}}{{8-14=methodWithInt}}{{23-26=forSomeClass}}{{49-57=dividingDouble}}{{none}}
   // expected-note@-3{{move 'method(_:for:dividing:)' to an extension to silence this warning}}
   // expected-note@-4{{make 'method(_:for:dividing:)' private to silence this warning}}{{3-3=private }}
 }
@@ -100,7 +100,7 @@ class C5a : P5 {
 class C6a : P6 {
   func methodWithInt(_: Int, forSomeClass: SomeClass, dividingDouble: Double) { }
   // expected-warning@-1{{instance method 'methodWithInt(_:forSomeClass:dividingDouble:)' nearly matches optional requirement 'method(_:for:dividing:)' of protocol 'P6'}}
-  // expected-note@-2{{rename to 'method(_:for:dividing:)' to satisfy this requirement}}{{3-3=@objc(method:for:dividing:) }}{{8-21=method}}{{30-30=for }}{{55-55=dividing }}
+  // expected-note@-2{{rename to 'method(_:for:dividing:)' to satisfy this requirement}}{{8-21=method}}{{30-30=for }}{{55-55=dividing }}{{none}}
   // expected-note@-3{{move 'methodWithInt(_:forSomeClass:dividingDouble:)' to an extension to silence this warning}}
   // expected-note@-4{{make 'methodWithInt(_:forSomeClass:dividingDouble:)' private to silence this warning}}{{3-3=private }}
 }
@@ -114,8 +114,42 @@ class C6a : P6 {
 class C7a : P7 {
   @objc func method(foo: Double) { }
   // expected-warning@-1{{instance method 'method(foo:)' nearly matches optional requirement 'method(foo:)' of protocol 'P7'}}
-  // expected-note@-2{{candidate has non-matching type '(foo: Double) -> ()'}}
+  // expected-note@-2{{candidate has non-matching type '(Double) -> ()'}}
   // expected-note@-3{{move 'method(foo:)' to an extension to silence this warning}}
   // expected-note@-4{{make 'method(foo:)' private to silence this warning}}
 }
 
+// Don't complain about near misses that satisfy other protocol
+// requirements.
+@objc protocol P8 {
+  @objc optional func foo(exactMatch: Int)
+}
+
+@objc protocol P9 : P8 {
+  @objc optional func foo(nearMatch: Int)
+}
+
+class C8Super : P8 { }
+
+class C9Sub : C8Super, P9 {
+  func foo(exactMatch: Int) { }
+}
+
+// Don't complain about overriding methods that are near misses;
+// the user cannot make it satisfy the protocol requirement.
+class C10Super {
+  func foo(nearMatch: Int) { }
+}
+
+class C10Sub : C10Super, P8 {
+  override func foo(nearMatch: Int) { }
+}
+
+// Be more strict about near misses than we had previously.
+@objc protocol P11 {
+  @objc optional func foo(wibble: Int)
+}
+
+class C11 : P11 {
+  func f(waggle: Int) { } // no warning
+}

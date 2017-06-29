@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -19,7 +19,7 @@ struct _StringBufferIVars {
   }
 
   internal init(
-    _usedEnd: UnsafeMutablePointer<_RawByte>,
+    _usedEnd: UnsafeMutableRawPointer,
     byteCapacity: Int,
     elementWidth: Int
   ) {
@@ -31,7 +31,7 @@ struct _StringBufferIVars {
 
   // This stored property should be stored at offset zero.  We perform atomic
   // operations on it using _HeapBuffer's pointer.
-  var usedEnd: UnsafeMutablePointer<_RawByte>?
+  var usedEnd: UnsafeMutableRawPointer?
 
   var capacityAndElementShift: Int
   var byteCapacity: Int {
@@ -76,22 +76,26 @@ public struct _StringBuffer {
     _storage = _Storage(
       HeapBufferStorage.self,
       _StringBufferIVars(_elementWidth: elementWidth),
-      (capacity + capacityBump + divRound) >> divRound
+      (capacity + capacityBump + divRound) &>> divRound
     )
-    self.usedEnd = start + (initialSize << elementShift)
+    // This conditional branch should fold away during code gen.
+    if elementShift == 0 {
+      start.bindMemory(to: UTF8.CodeUnit.self, capacity: initialSize)
+    }
+    else {
+      start.bindMemory(to: UTF16.CodeUnit.self, capacity: initialSize)
+    }
+
+    self.usedEnd = start + (initialSize &<< elementShift)
     _storage.value.capacityAndElementShift
-      = ((_storage._capacity() - capacityBump) << 1) + elementShift
+      = ((_storage.capacity - capacityBump) &<< 1) + elementShift
   }
 
-  @warn_unused_result
-  static func fromCodeUnits<
-    Input : Collection, // Sequence?
-    Encoding : UnicodeCodec
-    where Input.Iterator.Element == Encoding.CodeUnit
-  >(
+  static func fromCodeUnits<Input : Sequence, Encoding : _UnicodeEncoding>(
     _ input: Input, encoding: Encoding.Type, repairIllFormedSequences: Bool,
     minimumCapacity: Int = 0
-  ) -> (_StringBuffer?, hadError: Bool) {
+  ) -> (_StringBuffer?, hadError: Bool)
+    where Input.Element == Encoding.CodeUnit {
     // Determine how many UTF-16 code units we'll need
     let inputStream = input.makeIterator()
     guard let (utf16Count, isAscii) = UTF16.transcodedLength(
@@ -108,7 +112,7 @@ public struct _StringBuffer {
         elementWidth: isAscii ? 1 : 2)
 
     if isAscii {
-      var p = UnsafeMutablePointer<UTF8.CodeUnit>(result.start)
+      var p = result.start.assumingMemoryBound(to: UTF8.CodeUnit.self)
       let sink: (UTF32.CodeUnit) -> Void = {
         p.pointee = UTF8.CodeUnit($0)
         p += 1
@@ -117,7 +121,7 @@ public struct _StringBuffer {
         input.makeIterator(),
         from: encoding, to: UTF32.self,
         stoppingOnError: true,
-        sendingOutputTo: sink)
+        into: sink)
       _sanityCheck(!hadError, "string cannot be ASCII if there were decoding errors")
       return (result, hadError)
     }
@@ -131,19 +135,19 @@ public struct _StringBuffer {
         input.makeIterator(),
         from: encoding, to: UTF16.self,
         stoppingOnError: !repairIllFormedSequences,
-        sendingOutputTo: sink)
+        into: sink)
       return (result, hadError)
     }
   }
 
   /// A pointer to the start of this buffer's data area.
   public // @testable
-  var start: UnsafeMutablePointer<_RawByte> {
-    return UnsafeMutablePointer(_storage.baseAddress)
+  var start: UnsafeMutableRawPointer {
+    return UnsafeMutableRawPointer(_storage.baseAddress)
   }
 
   /// A past-the-end pointer for this buffer's stored data.
-  var usedEnd: UnsafeMutablePointer<_RawByte> {
+  var usedEnd: UnsafeMutableRawPointer {
     get {
       return _storage.value.usedEnd!
     }
@@ -153,17 +157,17 @@ public struct _StringBuffer {
   }
 
   var usedCount: Int {
-    return (usedEnd - start) >> elementShift
+    return (usedEnd - start) &>> elementShift
   }
 
   /// A past-the-end pointer for this buffer's available storage.
-  var capacityEnd: UnsafeMutablePointer<_RawByte> {
+  var capacityEnd: UnsafeMutableRawPointer {
     return start + _storage.value.byteCapacity
   }
 
   /// The number of elements that can be stored in this buffer.
   public var capacity: Int {
-    return _storage.value.byteCapacity >> elementShift
+    return _storage.value.byteCapacity &>> elementShift
   }
 
   /// 1 if the buffer stores UTF-16; 0 otherwise.
@@ -181,70 +185,17 @@ public struct _StringBuffer {
   // reserveCapacity on String and subsequently use that capacity, in
   // two separate phases.  Operations with one-phase growth should use
   // "grow()," below.
-  @warn_unused_result
   func hasCapacity(
-    _ cap: Int, forSubRange r: Range<UnsafePointer<_RawByte>>
+    _ cap: Int, forSubRange r: Range<UnsafeRawPointer>
   ) -> Bool {
     // The substring to be grown could be pointing in the middle of this
     // _StringBuffer.
-    let offset = (r.lowerBound - UnsafePointer(start)) >> elementShift
+    let offset = (r.lowerBound - UnsafeRawPointer(start)) &>> elementShift
     return cap + offset <= capacity
   }
 
-
-  /// Attempt to claim unused capacity in the buffer.
-  ///
-  /// Operation succeeds if there is sufficient capacity, and either:
-  /// - the buffer is uniquely-referenced, or
-  /// - `oldUsedEnd` points to the end of the currently used capacity.
-  ///
-  /// - parameter bounds: Range of the substring that the caller tries
-  ///   to extend.
-  /// - parameter newUsedCount: The desired size of the substring.
-  @inline(__always)
-  @discardableResult
-  mutating func grow(
-    oldBounds bounds: Range<UnsafePointer<_RawByte>>, newUsedCount: Int
-  ) -> Bool {
-    var newUsedCount = newUsedCount
-    // The substring to be grown could be pointing in the middle of this
-    // _StringBuffer.  Adjust the size so that it covers the imaginary
-    // substring from the start of the buffer to `oldUsedEnd`.
-    newUsedCount += (bounds.lowerBound - UnsafePointer(start)) >> elementShift
-
-    if _slowPath(newUsedCount > capacity) {
-      return false
-    }
-
-    let newUsedEnd = start + (newUsedCount << elementShift)
-
-    if _fastPath(self._storage.isUniquelyReferenced()) {
-      usedEnd = newUsedEnd
-      return true
-    }
-
-    // Optimization: even if the buffer is shared, but the substring we are
-    // trying to grow is located at the end of the buffer, it can be grown in
-    // place.  The operation should be implemented in a thread-safe way,
-    // though.
-    //
-    // if usedEnd == bounds.upperBound {
-    //  usedEnd = newUsedEnd
-    //  return true
-    // }
-    let usedEndPhysicalPtr =
-      UnsafeMutablePointer<UnsafeMutablePointer<_RawByte>>(_storage._value)
-    var expected = UnsafeMutablePointer<_RawByte>(bounds.upperBound)
-    if _stdlib_atomicCompareExchangeStrongPtr(
-      object: usedEndPhysicalPtr, expected: &expected, desired: newUsedEnd) {
-      return true
-    }
-
-    return false
-  }
-
   var _anyObject: AnyObject? {
-    return _storage.storage != nil ? _storage.storage! : nil
+    return _storage.storage
   }
 
   var _storage: _Storage

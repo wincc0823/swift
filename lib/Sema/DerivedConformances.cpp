@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -15,7 +15,9 @@
 #include "swift/AST/Stmt.h"
 #include "swift/AST/Expr.h"
 #include "swift/AST/Pattern.h"
+#include "swift/AST/ParameterList.h"
 #include "swift/AST/Types.h"
+#include "swift/ClangImporter/ClangModule.h"
 #include "DerivedConformances.h"
 
 using namespace swift;
@@ -53,30 +55,53 @@ ValueDecl *DerivedConformance::getDerivableRequirement(NominalTypeDecl *nominal,
     if (name.isSimpleName(ctx.Id_hashValue))
       return getRequirement(KnownProtocolKind::Hashable);
 
-    // ErrorProtocol._code
-    if (name.isSimpleName(ctx.Id_code_))
-      return getRequirement(KnownProtocolKind::ErrorProtocol);
-
     // _BridgedNSError._nsErrorDomain
     if (name.isSimpleName(ctx.Id_nsErrorDomain))
       return getRequirement(KnownProtocolKind::BridgedNSError);
+
+    // CodingKey.stringValue
+    if (name.isSimpleName(ctx.Id_stringValue))
+      return getRequirement(KnownProtocolKind::CodingKey);
+
+    // CodingKey.intValue
+    if (name.isSimpleName(ctx.Id_intValue))
+      return getRequirement(KnownProtocolKind::CodingKey);
 
     return nullptr;
   }
 
   // Functions.
   if (auto func = dyn_cast<FuncDecl>(requirement)) {
-    if (func->isOperator() && name.getBaseName().str() == "==")
+    if (func->isOperator() && name.getBaseName() == "==")
       return getRequirement(KnownProtocolKind::Equatable);
+
+    // Encodable.encode(to: Encoder)
+    if (name.isCompoundName() && name.getBaseName() == ctx.Id_encode) {
+      auto argumentNames = name.getArgumentNames();
+      if (argumentNames.size() == 1 && argumentNames[0] == ctx.Id_to)
+        return getRequirement(KnownProtocolKind::Encodable);
+    }
 
     return nullptr;
   }
 
   // Initializers.
-  if (isa<ConstructorDecl>(requirement)) {
+  if (auto ctor = dyn_cast<ConstructorDecl>(requirement)) {
     auto argumentNames = name.getArgumentNames();
-    if (argumentNames.size() == 1 && argumentNames[0] == ctx.Id_rawValue)
-      return getRequirement(KnownProtocolKind::RawRepresentable);
+    if (argumentNames.size() == 1) {
+      if (argumentNames[0] == ctx.Id_rawValue)
+        return getRequirement(KnownProtocolKind::RawRepresentable);
+
+      // CodingKey.init?(stringValue:), CodingKey.init?(intValue:)
+      if (ctor->getFailability() == OTK_Optional &&
+          (argumentNames[0] == ctx.Id_stringValue ||
+           argumentNames[0] == ctx.Id_intValue))
+        return getRequirement(KnownProtocolKind::CodingKey);
+
+      // Decodable.init(from: Decoder)
+      if (argumentNames[0] == ctx.Id_from)
+        return getRequirement(KnownProtocolKind::Decodable);
+    }
 
     return nullptr;
   }
@@ -93,26 +118,6 @@ ValueDecl *DerivedConformance::getDerivableRequirement(NominalTypeDecl *nominal,
   return nullptr;
 }
 
-void DerivedConformance::insertOperatorDecl(ASTContext &C,
-                                            IterableDeclContext *scope,
-                                            Decl *member) {
-  // Find the module.
-  auto mod = member->getModuleContext();
-
-  // Add it to the module in a DerivedFileUnit.
-  mod->getDerivedFileUnit().addDerivedDecl(cast<FuncDecl>(member));
-
-  // Add it as a derived global decl to the nominal type.
-  auto oldDerived = scope->getDerivedGlobalDecls();
-  auto oldSize = std::distance(oldDerived.begin(), oldDerived.end());
-  auto newDerived = C.Allocate<Decl*>(oldSize + 1);
-
-  std::move(oldDerived.begin(), oldDerived.end(), newDerived.begin());
-  newDerived[oldSize] = member;
-
-  scope->setDerivedGlobalDecls(newDerived);
-}
-
 DeclRefExpr *
 DerivedConformance::createSelfDeclRef(AbstractFunctionDecl *fn) {
   ASTContext &C = fn->getASTContext();
@@ -126,7 +131,8 @@ FuncDecl *DerivedConformance::declareDerivedPropertyGetter(TypeChecker &tc,
                                                  NominalTypeDecl *typeDecl,
                                                  Type propertyInterfaceType,
                                                  Type propertyContextType,
-                                                 bool isStatic) {
+                                                 bool isStatic,
+                                                 bool isFinal) {
   auto &C = tc.Context;
   auto parentDC = cast<DeclContext>(parentDecl);
   auto selfDecl = ParamDecl::createSelf(SourceLoc(), parentDC, isStatic);
@@ -136,44 +142,41 @@ FuncDecl *DerivedConformance::declareDerivedPropertyGetter(TypeChecker &tc,
   };
   
   FuncDecl *getterDecl =
-    FuncDecl::create(C, SourceLoc(), StaticSpellingKind::None, SourceLoc(),
-                     DeclName(), SourceLoc(), SourceLoc(), SourceLoc(),
-                     nullptr, Type(), params,
-                     TypeLoc::withoutLoc(propertyContextType), parentDC);
+    FuncDecl::create(C, /*StaticLoc=*/SourceLoc(), StaticSpellingKind::None,
+                     /*FuncLoc=*/SourceLoc(), DeclName(), /*NameLoc=*/SourceLoc(),
+                     /*Throws=*/false, /*ThrowsLoc=*/SourceLoc(),
+                     /*AccessorKeywordLoc=*/SourceLoc(),
+                     nullptr, params,
+                     TypeLoc::withoutLoc(propertyInterfaceType), parentDC);
   getterDecl->setImplicit();
   getterDecl->setStatic(isStatic);
 
-  // Compute the type of the getter.
-  GenericParamList *genericParams = getterDecl->getGenericParamsOfContext();
-  Type type = FunctionType::get(TupleType::getEmpty(C),
-                                propertyContextType);
-  Type selfType = getterDecl->computeSelfType();
-  selfDecl->overwriteType(selfType);
-  
-  if (genericParams)
-    type = PolymorphicFunctionType::get(selfType, type, genericParams);
-  else
-    type = FunctionType::get(selfType, type);
-  getterDecl->setType(type);
-  getterDecl->setBodyResultType(propertyContextType);
+  // If this is supposed to be a final method, mark it as such.
+  assert(isFinal || !parentDC->getAsClassOrClassExtensionContext());
+  if (isFinal && parentDC->getAsClassOrClassExtensionContext() &&
+      !getterDecl->isFinal())
+    getterDecl->getAttrs().add(new (C) FinalAttr(/*IsImplicit=*/true));
 
   // Compute the interface type of the getter.
   Type interfaceType = FunctionType::get(TupleType::getEmpty(C),
                                          propertyInterfaceType);
-  Type selfInterfaceType = getterDecl->computeInterfaceSelfType(false);
-  if (auto sig = parentDC->getGenericSignatureOfContext())
+  Type selfInterfaceType = getterDecl->computeInterfaceSelfType();
+  if (auto sig = parentDC->getGenericSignatureOfContext()) {
+    getterDecl->setGenericEnvironment(
+        parentDC->getGenericEnvironmentOfContext());
     interfaceType = GenericFunctionType::get(sig, selfInterfaceType,
                                              interfaceType,
                                              FunctionType::ExtInfo());
-  else
-    interfaceType = type;
+  } else
+    interfaceType = FunctionType::get(selfInterfaceType, interfaceType);
   getterDecl->setInterfaceType(interfaceType);
-  getterDecl->setAccessibility(typeDecl->getFormalAccess());
+  getterDecl->setAccessibility(std::max(typeDecl->getFormalAccess(),
+                                        Accessibility::Internal));
 
   // If the enum was not imported, the derived conformance is either from the
   // enum itself or an extension, in which case we will emit the declaration
   // normally.
-  if (parentDecl->hasClangNode())
+  if (isa<ClangModuleUnit>(parentDC->getModuleScopeContext()))
     tc.Context.addExternalDecl(getterDecl);
 
   return getterDecl;
@@ -187,19 +190,25 @@ DerivedConformance::declareDerivedReadOnlyProperty(TypeChecker &tc,
                                                    Type propertyInterfaceType,
                                                    Type propertyContextType,
                                                    FuncDecl *getterDecl,
-                                                   bool isStatic) {
+                                                   bool isStatic,
+                                                   bool isFinal) {
   auto &C = tc.Context;
   auto parentDC = cast<DeclContext>(parentDecl);
 
-  VarDecl *propDecl = new (C) VarDecl(isStatic, /*let*/ false,
-                                      SourceLoc(), name,
-                                      propertyContextType,
-                                      parentDC);
+  VarDecl *propDecl = new (C) VarDecl(/*IsStatic*/isStatic, /*IsLet*/false,
+                                      /*IsCaptureList*/false, SourceLoc(), name,
+                                      propertyContextType, parentDC);
   propDecl->setImplicit();
   propDecl->makeComputed(SourceLoc(), getterDecl, nullptr, nullptr,
                          SourceLoc());
-  propDecl->setAccessibility(typeDecl->getFormalAccess());
+  propDecl->setAccessibility(getterDecl->getFormalAccess());
   propDecl->setInterfaceType(propertyInterfaceType);
+
+  // If this is supposed to be a final property, mark it as such.
+  assert(isFinal || !parentDC->getAsClassOrClassExtensionContext());
+  if (isFinal && parentDC->getAsClassOrClassExtensionContext() &&
+      !propDecl->isFinal())
+    propDecl->getAttrs().add(new (C) FinalAttr(/*IsImplicit=*/true));
 
   Pattern *propPat = new (C) NamedPattern(propDecl, /*implicit*/ true);
   propPat->setType(propertyContextType);

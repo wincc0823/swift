@@ -4,14 +4,20 @@
 #
 # This source file is part of the Swift.org open source project
 #
-# Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+# Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 # Licensed under Apache License v2.0 with Runtime Library Exception
 #
-# See http://swift.org/LICENSE.txt for license information
-# See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+# See https://swift.org/LICENSE.txt for license information
+# See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 
 cd "$(dirname $0)/.." || exit
 SRC_DIR=$PWD
+
+DRY_RUN=
+if [[ "$1" == "-n" || "$1" == "--dry-run" ]] ; then
+    DRY_RUN="-n"
+    shift
+fi
 
 YEAR=$(date +"%Y")
 MONTH=$(date +"%m")
@@ -37,7 +43,7 @@ else
     SWIFT_PACKAGE=buildbot_linux
 fi
 
-./utils/build-script --preset="${SWIFT_PACKAGE}" \
+./utils/build-script ${DRY_RUN} --preset="${SWIFT_PACKAGE}" \
         install_destdir="${SWIFT_INSTALL_DIR}" \
         installable_package="${SWIFT_INSTALLABLE_PACKAGE}" \
         install_toolchain_dir="${SWIFT_TOOLCHAIN_DIR}" \

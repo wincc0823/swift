@@ -179,7 +179,7 @@ __attribute__((availability(ios,introduced=8.0)))
 @end
 
 @interface NSValue (NSRange)
-+ (NSValue *)valueWithRange:(NSRange)range;
+- (NSValue *)valueWithRange:(NSRange)range;
 @property NSRange rangeValue;
 @end
 
@@ -225,7 +225,7 @@ typedef __INT32_TYPE__ int32_t;
 + (nullable instancetype)stringWithPath:(NSString*)path encoding:(int)encoding;
 @end
 
-NSString *NSStringToNSString(NSString *str);
+__attribute__((warn_unused_result)) NSString *NSStringToNSString(NSString *str);
 
 @interface Bee : NSObject
 -(void)buzz;
@@ -255,7 +255,11 @@ NSString *NSStringToNSString(NSString *str);
 @end
 
 @interface NSURL : NSObject
+- (instancetype)URLWithString:(NSString *)URLString;
 + (instancetype)URLWithString:(NSString *)URLString;
+- (BOOL)getResourceValue:(out id _Nullable *)value
+                  forKey:(NSString *)key
+                   error:(out NSError *_Nullable *)error;
 @end
 
 @interface NSAttributedString : NSString
@@ -380,9 +384,21 @@ typedef NS_ENUM(unsigned char, NSAliasesEnum) {
   NSAliasesDifferentValue = 2
 };
 
+typedef NS_ENUM(unsigned char, NSUnavailableAliasesEnum) {
+  NSUnavailableAliasesOriginalAU = 0,
+  NSUnavailableAliasesAliasAU __attribute__((unavailable)) = 0,
+  NSUnavailableAliasesOriginalUA __attribute__((unavailable)) = 1,
+  NSUnavailableAliasesAliasUA = 1,
+  NSUnavailableAliasesOriginalUU __attribute__((unavailable)) = 2,
+  NSUnavailableAliasesAliasUU __attribute__((unavailable)) = 2,
+};
+
 NS_ENUM(NSInteger, NSMalformedEnumMissingTypedef) {
   NSMalformedEnumMissingTypedefValue
 };
+
+@interface NSNumberFormatter : NSObject
+@end
 
 typedef NS_ENUM(NSUInteger, NSNumberFormatterBehavior) {
   NSNumberFormatterBehaviorDefault = 0,
@@ -390,11 +406,20 @@ typedef NS_ENUM(NSUInteger, NSNumberFormatterBehavior) {
   NSNumberFormatterBehavior10_4 = 1040,
 };
 
+@interface NSNotification : NSObject
+@end
+
+@interface NSNotificationQueue : NSObject
+@end
+
 typedef NS_ENUM(NSUInteger, NSPostingStyle) {
   NSPostWhenIdle = 1,
   NSPostASAP = 2,
   NSPostNow = 3
 };
+
+@interface NSXMLNode : NSObject
+@end
 
 typedef NS_ENUM(NSUInteger, NSXMLNodeKind) {
   NSXMLInvalidKind = 0,
@@ -480,6 +505,9 @@ typedef NS_OPTIONS(NSUInteger, NSKeyValueObservingOptions) {
   NSKeyValueObservingOptionInitial /*NS_ENUM_AVAILABLE(10_5, 2_0)*/ = 0x04,
   NSKeyValueObservingOptionPrior /*NS_ENUM_AVAILABLE(10_5, 2_0)*/ = 0x08
 };
+
+@interface NSCalendar : NSObject
+@end
 
 #define NS_CALENDAR_ENUM_DEPRECATED(osx_in, osx_out, ios_in, ios_out, msg) \
   __attribute__((availability(macosx, introduced=osx_in, deprecated=osx_out, message=msg))) \
@@ -695,6 +723,7 @@ typedef NS_OPTIONS(NSUInteger, NSExplicitlyUnavailableOnOSXOptions) {
 @end
 
 @interface NSURLRequest : NSObject
+- (instancetype)requestWithString:(NSString *)URLString;
 + (instancetype)requestWithString:(NSString *)URLString;
 + (instancetype)URLRequestWithURL:(NSURL *)URL;
 @end
@@ -725,7 +754,7 @@ NSSet *setToSet(NSSet *dict);
 @end
 
 @interface NSProcessInfo : NSObject
-+ (nonnull NSProcessInfo *)processInfo;
+@property (class, readonly, strong, nonnull) NSProcessInfo *processInfo;
 @end
 
 @interface NSString(FoundationExts)
@@ -913,7 +942,7 @@ __attribute__((availability(macosx,introduced=10.52)))
 - (nonnull NSString *)stringByAppendingString:(nonnull NSString *)string;
 - (nonnull NSString *)stringWithString:(nonnull NSString *)string;
 - (nullable NSURL *)URLWithAddedString:(nonnull NSString *)string;
-+ (NSString *)stringForCalendarUnits:(NSCalendarUnit)units;
+- (NSString *)stringForCalendarUnits:(NSCalendarUnit)units;
 @end
 
 @interface NSURL (Properties)
@@ -1015,5 +1044,69 @@ extern NSString *NSHTTPRequestKey;
 -(void)messageSomeObject:(nonnull id)object selector:(SEL)selector;
 @end
 
+@interface NSOperation : NSObject
+@end
+
+@interface NSProgress : NSObject
+@end
+
+@protocol NSProgressReporting <NSObject>
+@property (readonly) NSProgress *progress;
+@end
+
+@interface NSIdLover: NSObject
+
+- (id _Nonnull)makesId;
+- (void)takesId:(id _Nonnull)x;
+- (void)takesArrayOfId:(const id _Nonnull * _Nonnull)x;
+- (void)takesNullableId:(id _Nullable)x;
+
+@property (strong) id propertyOfId;
+
+@end
+
 #define NSTimeIntervalSince1970 978307200.0
 #define NS_DO_SOMETHING 17
+
+typedef NS_ENUM(NSUInteger, NSClothingStyle) {
+  NSClothingStyleFormal = 0,
+  NSClothingStyleSemiFormal,
+  NSClothingStyleHipster,
+  NSClothingStyleHippie
+};
+static const NSClothingStyle NSClothingStyleOfficeCasual __attribute__((availability(swift,unavailable,replacement="NSClothingStyleSemiFormal"))) = NSClothingStyleSemiFormal;
+
+void acceptError(NSError * _Nonnull error);
+NSError * _Nonnull produceError(void);
+NSError * _Nullable produceOptionalError(void);
+
+extern NSString * const FictionalServerErrorDomain;
+
+typedef enum __attribute__((ns_error_domain(FictionalServerErrorDomain))) FictionalServerErrorCode : NSInteger {
+  FictionalServerErrorMeltedDown = 1
+} FictionalServerErrorCode;
+
+@protocol Garment
+@end
+
+@protocol Cotton
+@end
+
+@interface Coat
+@end
+
+@protocol NSLaundry
+- (void)wash:(Coat <Garment> * _Nonnull)garment;
+- (void)bleach:(Coat <Garment, Cotton> * _Nonnull)garment;
+- (Coat <Garment> * _Nonnull)dry;
+@end
+
+@interface NSLaundromat : NSObject
+@end
+
+extern NSString * const NSLaundryErrorDomain;
+
+typedef enum __attribute__((ns_error_domain(NSLaundryErrorDomain))) __attribute__((swift_name("NSLaundromat.Error"))) NSLaundryErrorCode {
+    NSLaundryErrorTooMuchSoap = 1,
+    NSLaundryErrorCatInWasher = 2
+};

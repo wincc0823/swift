@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -26,22 +26,22 @@ from gyb_stdlib_support import (
 ///
 /// - Note: This is the `IteratorProtocol` used by `FlattenSequence`,
 ///   `FlattenCollection`, and `BidirectionalFlattenCollection`.
-public struct FlattenIterator<
-  Base : IteratorProtocol where Base.Element : Sequence
-> : IteratorProtocol, Sequence {
+public struct FlattenIterator<Base : IteratorProtocol> : IteratorProtocol, Sequence
+  where Base.Element : Sequence {
 
   /// Construct around a `base` iterator.
   internal init(_base: Base) {
     self._base = _base
   }
 
-  /// Advance to the next element and return it, or `nil` if no next
-  /// element exists.
+  /// Advances to the next element and returns it, or `nil` if no next element
+  /// exists.
+  ///
+  /// Once `nil` has been returned, all subsequent calls return `nil`.
   ///
   /// - Precondition: `next()` has not been applied to a copy of `self`
-  ///   since the copy was made, and no preceding call to `self.next()`
-  ///   has returned `nil`.
-  public mutating func next() -> Base.Element.Iterator.Element? {
+  ///   since the copy was made.
+  public mutating func next() -> Base.Element.Element? {
     repeat {
       if _fastPath(_inner != nil) {
         let ret = _inner!.next()
@@ -68,18 +68,17 @@ public struct FlattenIterator<
 /// The elements of this view are a concatenation of the elements of
 /// each sequence in the base.
 ///
-/// The `flatten` property is always lazy, but does not implicitly
+/// The `joined` method is always lazy, but does not implicitly
 /// confer laziness on algorithms applied to its result.  In other
 /// words, for ordinary sequences `s`:
 ///
-/// * `s.flatten()` does not create new storage
-/// * `s.flatten().map(f)` maps eagerly and returns a new array
-/// * `s.lazy.flatten().map(f)` maps lazily and returns a `LazyMapSequence`
+/// * `s.joined()` does not create new storage
+/// * `s.joined().map(f)` maps eagerly and returns a new array
+/// * `s.lazy.joined().map(f)` maps lazily and returns a `LazyMapSequence`
 ///
 /// - See also: `FlattenCollection`
-public struct FlattenSequence<
-  Base : Sequence where Base.Iterator.Element : Sequence
-> : Sequence {
+public struct FlattenSequence<Base : Sequence> : Sequence
+  where Base.Element : Sequence {
 
   /// Creates a concatenation of the elements of the elements of `base`.
   ///
@@ -94,11 +93,11 @@ public struct FlattenSequence<
   public func makeIterator() -> FlattenIterator<Base.Iterator> {
     return FlattenIterator(_base: _base.makeIterator())
   }
-  
+
   internal var _base: Base
 }
 
-extension Sequence where Iterator.Element : Sequence {
+extension Sequence where Element : Sequence {
   /// Returns the elements of this sequence of sequences, concatenated.
   ///
   /// In this example, an array of three ranges is flattened so that the
@@ -114,33 +113,37 @@ extension Sequence where Iterator.Element : Sequence {
   ///     // Prints "8..<10"
   ///     // Prints "15..<17"
   ///
-  ///     // Use 'flatten()' to access each element of each range:
-  ///     for index in ranges.flatten() {
+  ///     // Use 'joined()' to access each element of each range:
+  ///     for index in ranges.joined() {
   ///         print(index, terminator: " ")
   ///     }
   ///     // Prints: "0 1 2 8 9 15 16"
   ///
   /// - Returns: A flattened view of the elements of this
   ///   sequence of sequences.
-  ///
-  /// - SeeAlso: `flatMap(_:)`, `joined(separator:)`
-  @warn_unused_result
-  public func flatten() -> FlattenSequence<Self> {
+  public func joined() -> FlattenSequence<Self> {
     return FlattenSequence(_base: self)
+  }
+
+  @available(*, unavailable, renamed: "joined()")
+  public func flatten() -> FlattenSequence<Self> {
+    Builtin.unreachable()
   }
 }
 
-extension LazySequenceProtocol
-  where
-  Elements.Iterator.Element == Iterator.Element,
-  Iterator.Element : Sequence {
+extension LazySequenceProtocol where Element : Sequence {
 
-  /// A concatenation of the elements of `self`.
-  @warn_unused_result
-  public func flatten() -> LazySequence<
+  /// Returns a lazy sequence that concatenates the elements of this sequence of
+  /// sequences.
+  public func joined() -> LazySequence<
     FlattenSequence<Elements>
   > {
     return FlattenSequence(_base: elements).lazy
+  }
+
+  @available(*, unavailable, renamed: "joined()")
+  public func flatten() -> LazySequence<FlattenSequence<Elements>> {
+    Builtin.unreachable()
   }
 }
 
@@ -153,15 +156,14 @@ extension LazySequenceProtocol
 %   Index = Collection + 'Index'
 %   Slice = sliceTypeName(traversal=traversal, mutable=False, rangeReplaceable=False)
 /// A position in a `${Collection}`.
-public struct ${Index}<
-  BaseElements : ${collectionForTraversal(traversal)}
+public struct ${Index}<BaseElements>
   where
-  ${constraints % {'Base': 'BaseElements.'}}
-> : Comparable {
+  BaseElements : ${collectionForTraversal(traversal)},
+  ${constraints % {'Base': 'BaseElements.'}} {
 
   internal init(
     _ _outer: BaseElements.Index,
-    _ inner: BaseElements.Iterator.Element.Index?) {
+    _ inner: BaseElements.Element.Index?) {
     self._outer = _outer
     self._inner = inner
   }
@@ -175,37 +177,37 @@ public struct ${Index}<
   /// When `_inner != nil`, `_inner!` is a valid subscript of `base[_outer]`;
   /// when `_inner == nil`, `_outer == base.endIndex` and this index is
   /// `endIndex` of the `${Collection}`.
-  internal let _inner: BaseElements.Iterator.Element.Index?
+  internal let _inner: BaseElements.Element.Index?
 }
 
-@warn_unused_result
-public func == <BaseElements> (
-  lhs: ${Index}<BaseElements>, 
-  rhs: ${Index}<BaseElements>
-) -> Bool {
-  return lhs._outer == rhs._outer && lhs._inner == rhs._inner
-}
-
-@warn_unused_result
-public func < <BaseElements> (
-  lhs: ${Index}<BaseElements>, 
-  rhs: ${Index}<BaseElements>
-) -> Bool {
-  // FIXME: swift-3-indexing-model: tests.
-  if lhs._outer != rhs._outer {
-    return lhs._outer < rhs._outer
+extension ${Index} : Comparable {
+  public static func == (
+    lhs: ${Index}<BaseElements>,
+    rhs: ${Index}<BaseElements>
+  ) -> Bool {
+    return lhs._outer == rhs._outer && lhs._inner == rhs._inner
   }
 
-  if let lhsInner = lhs._inner, rhsInner = rhs._inner {
-    return lhsInner < rhsInner
+  public static func < (
+    lhs: ${Index}<BaseElements>,
+    rhs: ${Index}<BaseElements>
+  ) -> Bool {
+    // FIXME: swift-3-indexing-model: tests.
+    if lhs._outer != rhs._outer {
+      return lhs._outer < rhs._outer
+    }
+
+    if let lhsInner = lhs._inner, let rhsInner = rhs._inner {
+      return lhsInner < rhsInner
+    }
+
+    // When combined, the two conditions above guarantee that both
+    // `_outer` indices are `_base.endIndex` and both `_inner` indices
+    // are `nil`, since `_inner` is `nil` iff `_outer == base.endIndex`.
+    _precondition(lhs._inner == nil && rhs._inner == nil)
+
+    return false
   }
-
-  // When combined, the two conditions above guarantee that both
-  // `_outer` indices are `_base.endIndex` and both `_inner` indices
-  // are `nil`, since `_inner` is `nil` iff `_outer == base.endIndex`.
-  _precondition(lhs._inner == nil && rhs._inner == nil)
-
-  return false
 }
 
 /// A flattened view of a base collection of collections.
@@ -213,13 +215,13 @@ public func < <BaseElements> (
 /// The elements of this view are a concatenation of the elements of
 /// each collection in the base.
 ///
-/// The `flatten` property is always lazy, but does not implicitly
+/// The `joined` method is always lazy, but does not implicitly
 /// confer laziness on algorithms applied to its result.  In other
 /// words, for ordinary collections `c`:
 ///
-/// * `c.flatten()` does not create new storage
-/// * `c.flatten().map(f)` maps eagerly and returns a new array
-/// * `c.lazy.flatten().map(f)` maps lazily and returns a `LazyMapCollection`
+/// * `c.joined()` does not create new storage
+/// * `c.joined().map(f)` maps eagerly and returns a new array
+/// * `c.lazy.joined().map(f)` maps lazily and returns a `LazyMapCollection`
 ///
 /// - Note: The performance of accessing `startIndex`, `first`, any methods
 ///   that depend on `startIndex`, or of advancing a `${Collection}Index`
@@ -230,11 +232,10 @@ public func < <BaseElements> (
 ///   documented complexity.
 ///
 /// - See also: `FlattenSequence`
-public struct ${Collection}<
-  Base : ${collectionForTraversal(traversal)}
+public struct ${Collection}<Base> : ${collectionForTraversal(traversal)}
   where
-  ${constraints % {'Base': 'Base.'}}
-> : ${collectionForTraversal(traversal)} {
+  Base : ${collectionForTraversal(traversal)},
+  ${constraints % {'Base': 'Base.'}} {
   // FIXME: swift-3-indexing-model: check test coverage for collection.
 
   /// A type that represents a valid position in the collection.
@@ -244,7 +245,7 @@ public struct ${Collection}<
   public typealias Index = ${Index}<Base>
 
   public typealias IndexDistance = Base.IndexDistance
-  
+
   /// Creates a flattened view of `base`.
   public init(_ base: Base) {
     self._base = base
@@ -284,7 +285,6 @@ public struct ${Collection}<
   }
 
   // TODO: swift-3-indexing-model - add docs
-  @warn_unused_result
   public func index(after i: Index) -> Index {
     let innerCollection = _base[i._outer]
     let nextInner = innerCollection.index(after: i._inner!)
@@ -306,7 +306,6 @@ public struct ${Collection}<
 
 % if traversal == 'Bidirectional':
   // TODO: swift-3-indexing-model - add docs
-  @warn_unused_result
   public func index(before i: Index) -> Index {
     var prevOuter = i._outer
     if prevOuter == _base.endIndex {
@@ -325,13 +324,13 @@ public struct ${Collection}<
   }
 % end
 
-  /// Access the element at `position`.
+  /// Accesses the element at `position`.
   ///
   /// - Precondition: `position` is a valid position in `self` and
   ///   `position != endIndex`.
   public subscript(
     position: Index
-  ) -> Base.Iterator.Element.Iterator.Element {
+  ) -> Base.Element.Element {
     return _base[position._outer][position._inner!]
   }
 
@@ -345,19 +344,19 @@ public struct ${Collection}<
   // just return zero.
   public var underestimatedCount: Int { return 0 }
 
-  public func _copyToNativeArrayBuffer()
-    -> _ContiguousArrayBuffer<Base.Iterator.Element.Iterator.Element> {
+  public func _copyToContiguousArray()
+    -> ContiguousArray<Base.Element.Element> {
 
-    // The default implementation of `_copyToNativeArrayBuffer` queries the
+    // The default implementation of `_copyToContiguousArray` queries the
     // `count` property, which materializes every inner collection.  This is a
     // bad default for `flatMap()`.  So we treat `self` as a sequence and only
     // rely on underestimated count.
-    return _copySequenceToNativeArrayBuffer(self)
+    return _copySequenceToContiguousArray(self)
   }
 
   // TODO: swift-3-indexing-model - add docs
   public func forEach(
-    _ body: @noescape (Base.Iterator.Element.Iterator.Element) throws -> Void
+    _ body: (Base.Element.Element) throws -> Void
   ) rethrows {
     // FIXME: swift-3-indexing-model: tests.
     for innerCollection in _base {
@@ -388,45 +387,51 @@ extension ${collectionForTraversal(traversal)}
   ///     // Prints "8..<10"
   ///     // Prints "15..<17"
   ///
-  ///     // Use 'flatten()' to access each element of each range:
-  ///     for index in ranges.flatten() {
+  ///     // Use 'joined()' to access each element of each range:
+  ///     for index in ranges.joined() {
   ///         print(index, terminator: " ")
   ///     }
   ///     // Prints: "0 1 2 8 9 15 16"
   ///
   /// - Returns: A flattened view of the elements of this
   ///   collection of collections.
-  ///
-  /// - SeeAlso: `flatMap(_:)`, `joined(separator:)`
-  @warn_unused_result
-  public func flatten() -> ${Collection}<Self> {
+  public func joined() -> ${Collection}<Self> {
     return ${Collection}(self)
+  }
+
+  @available(*, unavailable, renamed: "joined()")
+  public func flatten() -> ${Collection}<Self> {
+    Builtin.unreachable()
   }
 }
 
 extension LazyCollectionProtocol
   where
+%   if traversal != 'Forward':
   Self : ${collectionForTraversal(traversal)},
   Elements : ${collectionForTraversal(traversal)},
-  ${constraints % {'Base': ''}},
-  ${constraints % {'Base': 'Elements.'}},
-  Iterator.Element == Elements.Iterator.Element {
+%   end
+  ${constraints % {'Base': 'Elements.'}}
+{
   /// A concatenation of the elements of `self`.
-  @warn_unused_result
-  public func flatten() -> LazyCollection<${Collection}<Elements>> {
+  public func joined() -> LazyCollection<${Collection}<Elements>> {
     return ${Collection}(elements).lazy
+  }
+
+  @available(*, unavailable, renamed: "joined()")
+  public func flatten() -> LazyCollection<${Collection}<Elements>> {
+    Builtin.unreachable()
   }
 }
 
 % end
 
 @available(*, unavailable, renamed: "FlattenIterator")
-public struct FlattenGenerator<
-  Base : IteratorProtocol where Base.Element : Sequence
-> {}
+public struct FlattenGenerator<Base : IteratorProtocol>
+  where Base.Element : Sequence {}
 
 extension FlattenSequence {
-  @available(*, unavailable, renamed: "makeIterator")
+  @available(*, unavailable, renamed: "makeIterator()")
   public func generate() -> FlattenIterator<Base.Iterator> {
     Builtin.unreachable()
   }
@@ -434,7 +439,7 @@ extension FlattenSequence {
 
 % for traversal in ('Forward', 'Bidirectional'):
 extension Flatten${collectionForTraversal(traversal)} {
-  @available(*, unavailable, message: "Please use underestimatedCount property instead.")
+  @available(*, unavailable, renamed: "getter:underestimatedCount()")
   public func underestimateCount() -> Int {
     Builtin.unreachable()
   }

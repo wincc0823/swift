@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -52,20 +52,13 @@ class Hash {
     return x
   }
 
-  func digestFast(_ Res: inout [UInt8]) {
-    fillBlock()
-    hash()
-    // We use [UInt8] to avoid using String::append.
-    hashStateFast(&Res)
-  }
-
   // private:
 
   // Hash state:
-  final var messageLength : Int = 0
-  final var dataLength : Int = 0
+  final var messageLength: Int = 0
+  final var dataLength: Int = 0
   final var data = [UInt8](repeating: 0, count: 64)
-  final var blocksize : Int
+  final var blocksize: Int
 
   /// \brief Hash the internal data.
   func hash() {
@@ -158,10 +151,10 @@ class MD5 : Hash {
                       6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21]
 
   // State
-  var h0 : UInt32 = 0
-  var h1 : UInt32 = 0
-  var h2 : UInt32 = 0
-  var h3 : UInt32 = 0
+  var h0: UInt32 = 0
+  var h1: UInt32 = 0
+  var h2: UInt32 = 0
+  var h3: UInt32 = 0
 
   init() {
     super.init(64)
@@ -240,7 +233,7 @@ class MD5 : Hash {
     var b = h1
     var c = h2
     var d = h3
-    var f, g : UInt32
+    var f, g: UInt32
 
     // Main loop:
     for i in 0..<64 {
@@ -292,7 +285,7 @@ class MD5 : Hash {
   override
   func hashStateFast(_ Res: inout [UInt8]) {
 #if !NO_RANGE
-    var Idx : Int = 0
+    var Idx: Int = 0
     for h in [h0, h1, h2, h3] {
       toHexFast(h, &Res, Idx)
       Idx += 8
@@ -309,11 +302,11 @@ class MD5 : Hash {
 
 class SHA1 : Hash {
   // State
-  var h0 : UInt32 = 0
-  var h1 : UInt32 = 0
-  var h2 : UInt32 = 0
-  var h3 : UInt32 = 0
-  var h4 : UInt32 = 0
+  var h0: UInt32 = 0
+  var h1: UInt32 = 0
+  var h2: UInt32 = 0
+  var h3: UInt32 = 0
+  var h4: UInt32 = 0
 
   init() {
     super.init(64)
@@ -350,7 +343,7 @@ class SHA1 : Hash {
 
     // Append the original message length as 64bit big endian:
     let len_in_bits = Int64(messageLength)*8
-    for i in 0..<8 {
+    for i in 0..<(8 as Int64) {
       let val = (len_in_bits >> ((7-i)*8)) & 0xFF
       data[dataLength] = UInt8(val)
       dataLength += 1
@@ -365,7 +358,7 @@ class SHA1 : Hash {
     var w = [UInt32](repeating: 0, count: 80)
 
     // Convert the Byte array to UInt32 array.
-    var word : UInt32 = 0
+    var word: UInt32 = 0
     for i in 0..<64 {
       word = word << 8
       word = word &+ UInt32(data[i])
@@ -387,7 +380,7 @@ class SHA1 : Hash {
     var C = h2
     var D = h3
     var E = h4
-    var K : UInt32, F : UInt32
+    var K: UInt32, F: UInt32
 
     for t in 0..<80 {
       if t < 20 {
@@ -403,7 +396,7 @@ class SHA1 : Hash {
         K = 0xca62c1d6
         F = B ^ C ^ D
       }
-      let Temp : UInt32 = rol(A,5) &+ F &+ E &+ w[t] &+ K
+      let Temp: UInt32 = rol(A,5) &+ F &+ E &+ w[t] &+ K
 
       E = D
       D = C
@@ -421,7 +414,7 @@ class SHA1 : Hash {
 
   override
   func hashState() -> String {
-    var Res : String = ""
+    var Res: String = ""
     for state in [h0, h1, h2, h3, h4] {
       Res += toHex(state)
     }
@@ -431,14 +424,14 @@ class SHA1 : Hash {
 
 class SHA256 :  Hash {
   // State
-  var h0 : UInt32 = 0
-  var h1 : UInt32 = 0
-  var h2 : UInt32 = 0
-  var h3 : UInt32 = 0
-  var h4 : UInt32 = 0
-  var h5 : UInt32 = 0
-  var h6 : UInt32 = 0
-  var h7 : UInt32 = 0
+  var h0: UInt32 = 0
+  var h1: UInt32 = 0
+  var h2: UInt32 = 0
+  var h3: UInt32 = 0
+  var h4: UInt32 = 0
+  var h5: UInt32 = 0
+  var h6: UInt32 = 0
+  var h7: UInt32 = 0
 
   var k : [UInt32] = [
    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -488,7 +481,7 @@ class SHA256 :  Hash {
 
     // Append the original message length as 64bit big endian:
     let len_in_bits = Int64(messageLength)*8
-    for i in 0..<8 {
+    for i in 0..<(8 as Int64) {
       let val = (len_in_bits >> ((7-i)*8)) & 0xFF
       data[dataLength] = UInt8(val)
       dataLength += 1
@@ -503,7 +496,7 @@ class SHA256 :  Hash {
     var w = [UInt32](repeating: 0, count: 64)
 
     // Convert the Byte array to UInt32 array.
-    var word : UInt32 = 0
+    var word: UInt32 = 0
     for i in 0..<64 {
       word = word << 8
       word = word &+ UInt32(data[i])
@@ -558,7 +551,7 @@ class SHA256 :  Hash {
 
   override
   func hashState() -> String {
-    var Res : String = ""
+    var Res: String = ""
     for state in [h0, h1, h2, h3, h4, h5, h6, h7] {
       Res += toHex(state)
     }
@@ -594,13 +587,12 @@ public func run_HashTest(_ N: Int) {
     let MD = MD5()
     for (K, V) in TestMD5 {
       MD.update(K)
-      CheckResults(MD.digest() == V,
-                   "Incorrect result in Hash: check 1 failed.")
+      CheckResults(MD.digest() == V)
       MD.reset()
     }
 
     // Check that we don't crash on large strings.
-    var S : String = ""
+    var S: String = ""
     for _ in 1...size {
       S += "a"
       MD.reset()
@@ -609,15 +601,14 @@ public func run_HashTest(_ N: Int) {
 
     // Check that the order in which we push values does not change the result.
     MD.reset()
-    var L : String = ""
+    var L: String = ""
     for _ in 1...size {
       L += "a"
       MD.update("a")
     }
     let MD2 = MD5()
     MD2.update(L)
-    CheckResults(MD.digest() == MD2.digest(),
-                 "Incorrect result in Hash: check 2 failed.")
+    CheckResults(MD.digest() == MD2.digest())
 
     // Test the famous MD5 collision from 2009: http://www.mscs.dal.ca/~selinger/md5collision/
     let Src1 : [UInt8] =
@@ -639,10 +630,8 @@ public func run_HashTest(_ N: Int) {
     H2.update(Src2)
     let A1 = H1.digest()
     let A2 = H2.digest()
-    CheckResults(A1 == A2,
-                 "Incorrect result in Hash: check 3 failed.")
-    CheckResults(A1 == "79054025255fb1a26e4bc422aef54eb4",
-                 "Incorrect result in Hash: check 4 failed.")
+    CheckResults(A1 == A2)
+    CheckResults(A1 == "79054025255fb1a26e4bc422aef54eb4")
     H1.reset()
     H2.reset()
 
@@ -650,15 +639,13 @@ public func run_HashTest(_ N: Int) {
     let SH256 = SHA256()
     for (K, V) in TestSHA1 {
       SH.update(K)
-      CheckResults(SH.digest() == V,
-                   "Incorrect result in Hash: check 5 failed.")
+      CheckResults(SH.digest() == V)
       SH.reset()
     }
 
     for (K, V) in TestSHA256 {
       SH256.update(K)
-      CheckResults(SH256.digest() == V,
-                   "Incorrect result in Hash: check 5 failed.")
+      CheckResults(SH256.digest() == V)
       SH256.reset()
     }
 
@@ -679,7 +666,6 @@ public func run_HashTest(_ N: Int) {
     }
     let SH2 = SHA1()
     SH2.update(L)
-    CheckResults(SH.digest() == SH2.digest(),
-                 "Incorrect result in Hash: check 5 failed.")
+    CheckResults(SH.digest() == SH2.digest())
   }
 }

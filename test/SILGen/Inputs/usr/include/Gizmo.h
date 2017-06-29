@@ -48,6 +48,9 @@ typedef long NSInteger;
 - (void) foo;
 - (void* _Nonnull) getBytes NS_RETURNS_INNER_POINTER;
 
+- (void)doTheThingWithOptions:(nonnull NSDictionary *)options;
+- (void)doTheOtherThingWithOptionalOptions:(nullable NSDictionary *)options;
+
 @property (nonnull) void *innerProperty;
 - (void* _Nonnull) innerProperty NS_RETURNS_INNER_POINTER;
 - (void) setInnerProperty: (void*)p;
@@ -62,6 +65,8 @@ typedef long NSInteger;
 + (Gizmo*)nonNilGizmo __attribute__((swift_name("nonNilGizmo()")));
 @property Gizmo* nonNilGizmoProperty;
 @property (unsafe_unretained) Gizmo* unownedNonNilGizmoProperty;
+
+@property id originalName __attribute__((swift_name("renamedProp")));
 @end
 
 @interface Guisemeau : Gizmo

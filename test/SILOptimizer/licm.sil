@@ -1,4 +1,4 @@
-// RUN: %target-sil-opt -enable-sil-verify-all %s -licm | FileCheck %s
+// RUN: %target-sil-opt -assume-parsing-unqualified-ownership-sil -enable-sil-verify-all %s -licm | %FileCheck %s
 
 sil_stage canonical
 
@@ -34,7 +34,7 @@ bb2(%54 : $Builtin.Word):
   %60 = integer_literal $Builtin.Word, 100
   %96 = ref_to_raw_pointer %59 : $Builtin.NativeObject to $Builtin.RawPointer
   %97 = index_raw_pointer %96 : $Builtin.RawPointer, %58 : $Builtin.Word
-  %98 = pointer_to_address %97 : $Builtin.RawPointer to $*Int
+  %98 = pointer_to_address %97 : $Builtin.RawPointer to [strict] $*Int
   %99 = index_addr %98 : $*Int, %54 : $Builtin.Word
   fix_lifetime %59: $Builtin.NativeObject
   store %1 to %99 : $*Int
@@ -80,11 +80,11 @@ bb2(%48 : $Builtin.Word):
   %60 = integer_literal $Builtin.Word, 100
   %61 = ref_to_raw_pointer %6 : $Builtin.NativeObject to $Builtin.RawPointer
   %62 = index_raw_pointer %61 : $Builtin.RawPointer, %52 : $Builtin.Word
-  %63 = pointer_to_address %62 : $Builtin.RawPointer to $*Builtin.NativeObject
+  %63 = pointer_to_address %62 : $Builtin.RawPointer to [strict] $*Builtin.NativeObject
   %64 = load %63 : $*Builtin.NativeObject
   %96 = ref_to_raw_pointer %64 : $Builtin.NativeObject to $Builtin.RawPointer
   %97 = index_raw_pointer %96 : $Builtin.RawPointer, %58 : $Builtin.Word
-  %98 = pointer_to_address %97 : $Builtin.RawPointer to $*Int
+  %98 = pointer_to_address %97 : $Builtin.RawPointer to [strict] $*Int
   %99 = index_addr %98 : $*Int, %48 : $Builtin.Word
   store %1 to %99 : $*Int
   %101 = builtin "cmp_eq_Word"(%58 : $Builtin.Word, %60 : $Builtin.Word) : $Builtin.Int1
@@ -243,4 +243,28 @@ bb4:
   strong_release %1 : $P
   %10 = tuple ()
   return %10 : $()
+}
+
+// CHECK-LABEL: dont_hoist_existential_meta_type
+// CHECK: bb0({{.*}}:
+// CHECK-NOT: existential_metatype
+// CHECK: bb1:
+// CHECK: existential_metatype
+// CHECK: cond_br
+// CHECK: bb2:
+sil @dont_hoist_existential_meta_type : $@convention(thin) (@in P) -> () {
+bb0(%0 : $*P):
+  %1 = alloc_stack $P
+  br bb1
+
+bb1:
+  copy_addr %0 to [initialization] %1 : $*P
+  %2 = existential_metatype $@thick P.Type, %1 : $*P
+  cond_br undef, bb1, bb2
+
+bb2:
+  dealloc_stack %1 : $*P
+  destroy_addr %0 : $*P
+  %52 = tuple ()
+  return %52 : $()
 }

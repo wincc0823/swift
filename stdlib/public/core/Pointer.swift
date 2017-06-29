@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -17,13 +17,12 @@ public protocol _Pointer {
   /// The underlying raw pointer value.
   var _rawValue: Builtin.RawPointer { get }
 
-  /// Construct a pointer from a raw value.
+  /// Creates a pointer from a raw value.
   init(_ _rawValue: Builtin.RawPointer)
 }
 
 /// Derive a pointer argument from a convertible pointer type.
 @_transparent
-@warn_unused_result
 public // COMPILER_INTRINSIC
 func _convertPointerToPointerArgument<
   FromPointer : _Pointer,
@@ -34,7 +33,6 @@ func _convertPointerToPointerArgument<
 
 /// Derive a pointer argument from the address of an inout parameter.
 @_transparent
-@warn_unused_result
 public // COMPILER_INTRINSIC
 func _convertInOutToPointerArgument<
   ToPointer : _Pointer
@@ -47,7 +45,6 @@ func _convertInOutToPointerArgument<
 /// This always produces a non-null pointer, even if the array doesn't have any
 /// storage.
 @_transparent
-@warn_unused_result
 public // COMPILER_INTRINSIC
 func _convertConstArrayToPointerArgument<
   FromElement,
@@ -59,8 +56,8 @@ func _convertConstArrayToPointerArgument<
   if let addr = opaquePointer {
     validPointer = ToPointer(addr._rawValue)
   } else {
-    let lastAlignedValue = ~(alignof(FromElement.self) - 1)
-    let lastAlignedPointer = UnsafePointer<Void>(bitPattern: lastAlignedValue)!
+    let lastAlignedValue = ~(MemoryLayout<FromElement>.alignment - 1)
+    let lastAlignedPointer = UnsafeRawPointer(bitPattern: lastAlignedValue)!
     validPointer = ToPointer(lastAlignedPointer._rawValue)
   }
   return (owner, validPointer)
@@ -70,7 +67,6 @@ func _convertConstArrayToPointerArgument<
 ///
 /// This always produces a non-null pointer, even if the array's length is 0.
 @_transparent
-@warn_unused_result
 public // COMPILER_INTRINSIC
 func _convertMutableArrayToPointerArgument<
   FromElement,
@@ -87,11 +83,10 @@ func _convertMutableArrayToPointerArgument<
 }
 
 /// Derive a UTF-8 pointer argument from a value string parameter.
-@warn_unused_result
 public // COMPILER_INTRINSIC
 func _convertConstStringToUTF8PointerArgument<
   ToPointer : _Pointer
 >(_ str: String) -> (AnyObject?, ToPointer) {
-  let utf8 = Array(str.nulTerminatedUTF8)
+  let utf8 = Array(str.utf8CString)
   return _convertConstArrayToPointerArgument(utf8)
 }

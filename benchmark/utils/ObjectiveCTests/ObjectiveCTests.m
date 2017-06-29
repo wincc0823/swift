@@ -2,11 +2,11 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
@@ -24,6 +24,25 @@
     [mutableArray addObject: myString];
   }
   myArrayOfStrings = [mutableArray copy];
+
+  id cal = [NSCalendar currentCalendar];
+  myBeginDate = [cal dateWithEra:1
+                            year:2016
+                           month:1
+                             day:29
+                            hour:1
+                          minute:1
+                          second:0
+                      nanosecond:0];
+  myEndDate = [cal dateWithEra:1
+                          year:2016
+                         month:1
+                           day:29
+                          hour:1
+                        minute:1
+                        second:0
+                    nanosecond:10];
+
   return self;
 }
 
@@ -43,5 +62,18 @@
   return myArrayOfStrings;
 }
 
+- (NSDate *)beginDate {
+  return myBeginDate;
+}
+
+- (NSDate *)endDate {
+  return myEndDate;
+}
+
+- (void)useDate:(NSDate *)date {
+  if ([date isEqualToDate:myBeginDate]) {
+    assert(false && "Dates should be different");
+  }
+}
 
 @end

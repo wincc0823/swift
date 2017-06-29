@@ -2,29 +2,29 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
-// See http://swift.org/LICENSE.txt for license information
-// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// See https://swift.org/LICENSE.txt for license information
+// See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
 //===----------------------------------------------------------------------===//
 
 @_exported
 import ObjectiveC
+import _SwiftObjectiveCOverlayShims
 
 //===----------------------------------------------------------------------===//
 // Objective-C Primitive Types
 //===----------------------------------------------------------------------===//
 
-public typealias Boolean = Swift.Boolean
 /// The Objective-C BOOL type.
 ///
 /// On 64-bit iOS, the Objective-C BOOL type is a typedef of C/C++
 /// bool. Elsewhere, it is "signed char". The Clang importer imports it as
 /// ObjCBool.
 @_fixed_layout
-public struct ObjCBool : Boolean, BooleanLiteralConvertible {
+public struct ObjCBool : ExpressibleByBooleanLiteral {
 #if os(OSX) || (os(iOS) && (arch(i386) || arch(arm)))
   // On OS X and 32-bit iOS, Objective-C's BOOL type is a "signed char".
   var _value: Int8
@@ -39,7 +39,7 @@ public struct ObjCBool : Boolean, BooleanLiteralConvertible {
 
 #else
   // Everywhere else it is C/C++'s "Bool"
-  var _value : Bool
+  var _value: Bool
 
   public init(_ value: Bool) {
     self._value = value
@@ -78,16 +78,14 @@ extension ObjCBool : CustomStringConvertible {
 
 // Functions used to implicitly bridge ObjCBool types to Swift's Bool type.
 
-@warn_unused_result
 public // COMPILER_INTRINSIC
 func _convertBoolToObjCBool(_ x: Bool) -> ObjCBool {
   return ObjCBool(x)
 }
 
-@warn_unused_result
 public // COMPILER_INTRINSIC
 func _convertObjCBoolToBool(_ x: ObjCBool) -> Bool {
-  return Bool(x)
+  return x.boolValue
 }
 
 /// The Objective-C SEL type.
@@ -98,22 +96,12 @@ func _convertObjCBoolToBool(_ x: ObjCBool) -> Bool {
 ///
 /// The compiler has special knowledge of this type.
 @_fixed_layout
-public struct Selector : StringLiteralConvertible {
-  var ptr : OpaquePointer
+public struct Selector : ExpressibleByStringLiteral {
+  var ptr: OpaquePointer
 
   /// Create a selector from a string.
   public init(_ str : String) {
     ptr = str.withCString { sel_registerName($0).ptr }
-  }
-
-  /// Create an instance initialized to `value`.
-  public init(unicodeScalarLiteral value: String) {
-    self.init(value)
-  }
-
-  /// Construct a selector from `value`.
-  public init(extendedGraphemeClusterLiteral value: String) {
-    self.init(value)
   }
 
   // FIXME: Fast-path this in the compiler, so we don't end up with
@@ -124,7 +112,6 @@ public struct Selector : StringLiteralConvertible {
   }
 }
 
-@warn_unused_result
 public func ==(lhs: Selector, rhs: Selector) -> Bool {
   return sel_isEqual(lhs, rhs)
 }
@@ -145,11 +132,7 @@ extension Selector : Equatable, Hashable {
 extension Selector : CustomStringConvertible {
   /// A textual representation of `self`.
   public var description: String {
-    let name = sel_getName(self)
-    if name == nil {
-      return "<NULL>"
-    }
-    return String(cString: name!)
+    return String(_sel: self)
   }
 }
 
@@ -174,7 +157,7 @@ extension Selector : CustomReflectable {
 
 @_fixed_layout
 public struct NSZone {
-  var pointer : OpaquePointer
+  var pointer: OpaquePointer
 }
 
 // Note: NSZone becomes Zone in Swift 3.
@@ -184,19 +167,12 @@ typealias Zone = NSZone
 // @autoreleasepool substitute
 //===----------------------------------------------------------------------===//
 
-@warn_unused_result
-@_silgen_name("_swift_objc_autoreleasePoolPush")
-func __pushAutoreleasePool() -> OpaquePointer
-
-@_silgen_name("_swift_objc_autoreleasePoolPop")
-func __popAutoreleasePool(_ pool: OpaquePointer)
-
 public func autoreleasepool<Result>(
-  _ body: @noescape () throws -> Result
+  invoking body: () throws -> Result
 ) rethrows -> Result {
-  let pool = __pushAutoreleasePool()
+  let pool = _swift_objc_autoreleasePoolPush()
   defer {
-    __popAutoreleasePool(pool)
+    _swift_objc_autoreleasePoolPop(pool)
   }
   return try body()
 }
@@ -212,25 +188,6 @@ public var YES: ObjCBool {
 @available(*, unavailable, message: "Use 'Bool' value 'false' instead")
 public var NO: ObjCBool {
   fatalError("can't retrieve unavailable property")
-}
-
-// FIXME: We can't make the fully-generic versions @_transparent due to
-// rdar://problem/19418937, so here are some @_transparent overloads
-// for ObjCBool
-@_transparent
-@warn_unused_result
-public func && <T : Boolean>(
-  lhs: T, rhs: @autoclosure () -> ObjCBool
-) -> Bool {
-  return lhs.boolValue ? rhs().boolValue : false
-}
-
-@_transparent
-@warn_unused_result
-public func || <T : Boolean>(
-  lhs: T, rhs: @autoclosure () -> ObjCBool
-) -> Bool {
-  return lhs.boolValue ? true : rhs().boolValue
 }
 
 //===----------------------------------------------------------------------===//
@@ -249,12 +206,12 @@ extension NSObject : Equatable, Hashable {
   /// - Note: the hash value is not guaranteed to be stable across
   ///   different invocations of the same program.  Do not persist the
   ///   hash value across program runs.
-  public var hashValue: Int {
+  @objc
+  open var hashValue: Int {
     return hash
   }
 }
 
-@warn_unused_result
 public func == (lhs: NSObject, rhs: NSObject) -> Bool {
   return lhs.isEqual(rhs)
 }

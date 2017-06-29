@@ -1,4 +1,4 @@
-// RUN: %target-parse-verify-swift
+// RUN: %target-typecheck-verify-swift
 
 //===----------------------------------------------------------------------===//
 // Tests for various simple enum constructs
@@ -36,7 +36,7 @@ func test1a() -> unionSearchFlags {
 
 func test1b(_ b : Bool) {
   _ = 123
-  _ = .description == 1 // expected-error{{type of expression is ambiguous without more context}} 
+  _ = .description == 1 // expected-error {{ambiguous reference to member '=='}} 
 }
 
 enum MaybeInt {
@@ -75,10 +75,12 @@ func test3(_ a: ZeroOneTwoThree) {
   var _ : Int =
      ZeroOneTwoThree.Zero // expected-error {{cannot convert value of type 'ZeroOneTwoThree' to specified type 'Int'}}
 
+  // expected-warning @+1 {{unused}}
   test3 ZeroOneTwoThree.Zero // expected-error {{expression resolves to an unused function}} expected-error{{consecutive statements}} {{8-8=;}}
   test3 (ZeroOneTwoThree.Zero)
   test3(ZeroOneTwoThree.Zero)
   test3 // expected-error {{expression resolves to an unused function}}
+  // expected-warning @+1 {{unused}}
   (ZeroOneTwoThree.Zero)
   
   var _ : ZeroOneTwoThree = .One(4)
@@ -217,8 +219,9 @@ func f() {
 }
 
 func union_error(_ a: ZeroOneTwoThree) {
-  var _ : ZeroOneTwoThree = .Zero(1) // expected-error {{contextual member 'Zero' has no associated value}}
-  var _ : ZeroOneTwoThree = .One // expected-error {{contextual member 'One' expects argument of type 'Int'}}
+  var _ : ZeroOneTwoThree = .Zero(1) // expected-error {{member 'Zero' takes no arguments}}
+  var _ : ZeroOneTwoThree = .Zero() // expected-error {{member 'Zero' is not a function}} {{34-36=}}
+  var _ : ZeroOneTwoThree = .One // expected-error {{member 'One' expects argument of type 'Int'}}
   var _ : ZeroOneTwoThree = .foo // expected-error {{type 'ZeroOneTwoThree' has no member 'foo'}}
   var _ : ZeroOneTwoThree = .foo() // expected-error {{type 'ZeroOneTwoThree' has no member 'foo'}}
 }
@@ -303,3 +306,14 @@ enum E21269142 {  // expected-note {{did you mean to specify a raw type on the e
 
 print(E21269142.Foo.rawValue)  // expected-error {{value of type 'E21269142' has no member 'rawValue'}}
 
+// Check that typo correction does something sensible with synthesized members.
+enum SyntheticMember { // expected-note {{did you mean the implicitly-synthesized property 'hashValue'?}}
+  case Foo
+}
+print(SyntheticMember.Foo.hasValue) // expected-error {{value of type 'SyntheticMember' has no member 'hasValue'}}
+
+// Non-materializable argument type
+enum Lens<T> {
+  case foo(inout T) // expected-error {{'inout' may only be used on parameters}}
+  case bar(inout T, Int) // expected-error {{'inout' may only be used on parameters}}
+}

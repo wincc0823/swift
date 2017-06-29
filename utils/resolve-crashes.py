@@ -4,6 +4,8 @@
 # where some compiler crashers have been fixed, and move them into the
 # "fixed" testsuite, removing the "--crash" in the process.
 
+from __future__ import print_function
+
 import os
 import re
 import sys
@@ -13,17 +15,19 @@ def execute_cmd(cmd):
     print(cmd)
     os.system(cmd)
 
+
 # The regular expression we use to match compiler-crasher lines.
 regex = re.compile(
-    '.*Swift :: '
-    '(compiler_crashers|compiler_crashers_2|IDE/crashers)/(.*\.swift).*')
+    '.*Swift(.*) :: '
+    '(compiler_crashers|compiler_crashers_2|IDE/crashers|SIL/crashers)'
+    '/(.*\.swift|.*\.sil).*')
 
 # Take the output of lit as standard input.
 for line in sys.stdin:
     match = regex.match(line)
     if match:
-        suffix = match.group(1)
-        filename = match.group(2)
+        suffix = match.group(2)
+        filename = match.group(3)
 
         # Move the test over to the fixed suite.
         from_filename = 'validation-test/%s/%s' % (suffix, filename)

@@ -1,4 +1,4 @@
-// RUN: %swift -parse -verify -parse-stdlib -target i386-apple-watchos2.0 %s
+// RUN: %swift -typecheck -verify -parse-stdlib -target i386-apple-watchos2.0 %s
 
 @available(watchOS, introduced: 1.0, deprecated: 1.5, obsoleted: 2.0,
               message: "you don't want to do that anyway")
@@ -59,8 +59,7 @@ if #available(iOS 9.3, *) {
 }
 
 if #available(iOS 9.3, watchOS 2.1, *) {
-  functionIntroducedOnwatchOS2_2() // expected-error {{'functionIntroducedOnwatchOS2_2()' is only available on watchOS 2.2 or newer}}
-      // expected-note@-1 {{add 'if #available' version check}}
+  functionIntroducedOnwatchOS2_2() // expected-error {{'functionIntroducedOnwatchOS2_2()' is only available on watchOS 2.2 or newer}} {{32-35=2.2}}
 }
 
 if #available(iOS 9.1, watchOS 2.2, *) {
@@ -70,7 +69,7 @@ if #available(iOS 9.1, watchOS 2.2, *) {
 if #available(iOS 8.0, watchOS 2.2, *) {
 }
 
-if #available(iOS 9.2, watchOS 1.0, *) { // expected-warning {{unnecessary check for 'watchOS'; minimum deployment target ensures guard will always be true}}
+if #available(iOS 9.2, watchOS 1.0, *) { // no-warning
 }
 
 

@@ -1,6 +1,4 @@
-// RUN: rm -rf %t && mkdir -p %t && %S/../../utils/gyb %s -o %t/FixedPoint.swift
-// RUN: %S/../../utils/line-directive %t/FixedPoint.swift -- %target-build-swift %t/FixedPoint.swift -o %t/a.out
-// RUN: %S/../../utils/line-directive %t/FixedPoint.swift -- %target-run %t/a.out
+// RUN: %target-run-simple-swiftgyb
 // REQUIRES: executable_test
 
 import StdlibUnittest
@@ -11,6 +9,7 @@ var FixedPoint = TestSuite("FixedPoint")
 %{
 
 import gyb
+from SwiftIntTypes import all_integer_types
 
 test_bit_patterns = [
   0x0000000000000000,
@@ -62,6 +61,32 @@ def get_fixed_point_hash(bit_pattern, src_bits, word_bits):
             bit_pattern ^ (bit_pattern >> 32), word_bits, True)
 
 }%
+
+//===----------------------------------------------------------------------===//
+// 'Int.Stride' type
+//===----------------------------------------------------------------------===//
+
+FixedPoint.test("Integers.Stride") {
+#if arch(i386) || arch(arm)
+
+% for self_ty in all_integer_types(32):
+%   Self = self_ty.stdlib_name
+  expectEqualType(Int.self, ${Self}.Stride.self)
+% end
+
+#elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le) || arch(s390x)
+
+% for self_ty in all_integer_types(64):
+%   Self = self_ty.stdlib_name
+  expectEqualType(Int.self, ${Self}.Stride.self)
+% end
+
+#else
+
+_UnimplementedError()
+
+#endif
+}
 
 //===----------------------------------------------------------------------===//
 // 'Int(truncatingBitPattern:)' initializer
@@ -118,7 +143,7 @@ FixedPoint.test("${Dst}(truncatingBitPattern:) from ${Src}(${bit_pattern})") {
       test_bit_patterns=test_bit_patterns,
       word_bits=32)}
 
-#elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le)
+#elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le) || arch(s390x)
 
   ${gyb.execute_template(
       truncating_bit_pattern_test_template,
@@ -155,7 +180,7 @@ FixedPoint.test("${Dst}(bitPattern:) from ${Src}(${bit_pattern})") {
 %     input = prepare_bit_pattern(bit_pattern, src_ty.bits, src_ty.is_signed)
     let input = get${Src}(${input})
 %     input = prepare_bit_pattern(input, src_ty.bits, False)
-    let output = get${Dst}(${Dst}(bitPattern: input))
+    let output = get${Dst}(${Dst}(bitPattern: input as ${Src}))
     let expected = get${Dst}(${prepare_bit_pattern(input, dst_ty.bits, dst_ty.is_signed)})
     expectEqual(expected, output)
   }
@@ -165,7 +190,7 @@ FixedPoint.test("${Dst}(bitPattern:) from ${Src}(${bit_pattern})") {
     let input = get${Src}(${input})
 
     // Pass a literal directly.
-    let literalOutput = get${Dst}(${Dst}(bitPattern: ${input}))
+    let literalOutput = get${Dst}(${Dst}(bitPattern: ${input} as ${Src}))
     let output = get${Dst}(${Dst}(bitPattern: input))
 
 %     input = prepare_bit_pattern(input, src_ty.bits, False)
@@ -190,7 +215,7 @@ FixedPoint.test("${Dst}(bitPattern:) from ${Src}(${bit_pattern})") {
       test_bit_patterns=test_bit_patterns,
       word_bits=32)}
 
-#elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le)
+#elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le) || arch(s390x)
 
   ${gyb.execute_template(
       bit_pattern_test_template,
@@ -248,7 +273,7 @@ FixedPoint.test("${Self}.hashValue") {
       test_bit_patterns=test_bit_patterns,
       word_bits=32)}
 
-#elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le)
+#elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le) || arch(s390x)
 
   ${gyb.execute_template(
       hash_value_test_template,
@@ -267,16 +292,18 @@ _UnimplementedError()
 // Misc tests that should be expanded to cover all types (FIXME)
 //===----------------------------------------------------------------------===//
 
-func testBitwiseOperationsImpl<T : UnsignedInteger>(_: T.Type) {
-  var x = numericCast(0b11_1010_00) as T
-  var y = numericCast(0b10_1100_10) as T
+func testBitwiseOperationsImpl<
+  T : FixedWidthInteger & UnsignedInteger
+>(_: T.Type) {
+  let x = numericCast(0b11_1010_00) as T
+  let y = numericCast(0b10_1100_10) as T
 
   expectEqual(0b10_1000_00, x & y)
   expectEqual(0b11_1110_10, x | y)
   expectEqual(0b01_0110_10, x ^ y)
   expectEqual(0b00_0101_11, (~x) & 0xff)
 
-  var z = T.allZeros
+  let z: T = 0
   expectEqual(x, x | z)
   expectEqual(x, x ^ z)
   expectEqual(z, x & z)
@@ -300,17 +327,27 @@ FixedPoint.test("BitwiseOperations/UInt64") {
 }
 
 FixedPoint.test("OverflowCheck") {
-  expectEqual(Int8.addWithOverflow(4, 5), (9, false))
-  expectEqual(Int8.addWithOverflow(1, 127), (-128, true))
-  expectEqual(UInt8.multiplyWithOverflow(2,128), (0, true))
+  expectEqual((partialValue: 9, overflow: .none),
+    (4 as Int8).addingReportingOverflow(5))
+  expectEqual((partialValue: -128, overflow: .overflow),
+    (1 as Int8).addingReportingOverflow(127))
+  expectEqual((partialValue: 0, overflow: .overflow),
+    (2 as UInt8).multipliedReportingOverflow(by: 128))
 }
 
 FixedPoint.test("String.init") {
   let x: UInt32 = 0xdeadbeef
+#if _endian(little)
   expectEqual("efbeadde", String(x.bigEndian, radix: 16))
 
   let y = UInt32(bigEndian: 0xdeadbeef)
   expectEqual("deadbeef", String(y.bigEndian, radix: 16))
+#else
+  expectEqual("efbeadde", String(x.littleEndian, radix: 16))
+
+  let y = UInt32(littleEndian: 0xdeadbeef)
+  expectEqual("deadbeef", String(y.littleEndian, radix: 16))
+#endif
 }
 
 FixedPoint.test("byteSwapped") {
@@ -339,30 +376,16 @@ BoolTestSuite.test("init()") {
   expectFalse(v)
 }
 
-struct Booleanish : Boolean {
-  let boolValue: Bool
-}
-
-BoolTestSuite.test("init<T : Boolean>(_:)") {
+BoolTestSuite.test("Boolean") {
   do {
-    let v = Bool(Booleanish(boolValue: false))
+    var v = false
+    expectType(Bool.self, &v)
     expectFalse(v)
   }
   do {
-    let v = Bool(Booleanish(boolValue: true))
+    var v = true
+    expectType(Bool.self, &v)
     expectTrue(v)
-  }
-}
-
-BoolTestSuite.test("Boolean") {
-  do {
-    var v: Bool = false
-    expectIsBooleanType(&v)
-    expectFalse(v.boolValue)
-  }
-  do {
-    var v: Bool = true
-    expectTrue(v.boolValue)
   }
 }
 
@@ -378,10 +401,7 @@ BoolTestSuite.test("CustomStringConvertible") {
 }
 
 BoolTestSuite.test("Equatable,Hashable") {
-  checkHashable(true, false, false)
-  checkHashable(false, false, true)
-  checkHashable(true, true, true)
-
+  checkHashable([false, true], equalityOracle: { $0 == $1 })
   expectNotEqual(false.hashValue, true.hashValue)
 }
 
@@ -427,4 +447,3 @@ BoolTestSuite.test("||") {
 }
 
 runAllTests()
-
