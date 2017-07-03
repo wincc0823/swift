@@ -1681,7 +1681,7 @@ OverloadSignature ValueDecl::getOverloadSignature() const {
         if (auto funcTy = signature.InterfaceType->getAs<AnyFunctionType>()) {
           signature.InterfaceType
             = GenericFunctionType::get(genericSig,
-                                       funcTy->getInput(),
+                                       funcTy->getParams(),
                                        funcTy->getResult(),
                                        funcTy->getExtInfo())
                 ->getCanonicalType();
@@ -2861,10 +2861,11 @@ ProtocolDecl::ProtocolDecl(DeclContext *DC, SourceLoc ProtocolLoc,
   ProtocolDeclBits.RequiresClass = false;
   ProtocolDeclBits.ExistentialConformsToSelfValid = false;
   ProtocolDeclBits.ExistentialConformsToSelf = false;
-  KnownProtocol = 0;
   ProtocolDeclBits.Circularity
     = static_cast<unsigned>(CircularityCheck::Unchecked);
   HasMissingRequirements = false;
+  KnownProtocol = 0;
+  NumRequirementsInSignature = 0;
 }
 
 llvm::TinyPtrVector<ProtocolDecl *>
@@ -2895,7 +2896,7 @@ ProtocolDecl::getInheritedProtocols() const {
 
   // Gather inherited protocols from the requirement signature.
   auto selfType = getProtocolSelfType();
-  for (auto req : getRequirementSignature()->getRequirements()) {
+  for (const auto &req : getRequirementSignature()) {
     if (req.getKind() == RequirementKind::Conformance &&
         req.getFirstType()->isEqual(selfType))
       result.push_back(req.getSecondType()->castTo<ProtocolType>()->getDecl());
@@ -3020,9 +3021,8 @@ findProtocolSelfReferences(const ProtocolDecl *proto, Type type,
   // Tuples preserve variance.
   if (auto tuple = type->getAs<TupleType>()) {
     auto kind = SelfReferenceKind::None();
-    for (auto &elt: tuple->getElements()) {
-      kind |= findProtocolSelfReferences(proto, elt.getType(),
-                                         skipAssocTypes);
+    for (auto &elt : tuple->getElements()) {
+      kind |= findProtocolSelfReferences(proto, elt.getType(), skipAssocTypes);
     }
     return kind;
   } 
@@ -3030,8 +3030,11 @@ findProtocolSelfReferences(const ProtocolDecl *proto, Type type,
   // Function preserve variance in the result type, and flip variance in
   // the parameter type.
   if (auto funcTy = type->getAs<AnyFunctionType>()) {
-    auto inputKind = findProtocolSelfReferences(proto, funcTy->getInput(),
-                                                skipAssocTypes);
+    auto inputKind = SelfReferenceKind::None();
+    for (auto &elt : funcTy->getParams()) {
+      inputKind |= findProtocolSelfReferences(proto, elt.getType(),
+                                              skipAssocTypes);
+    }
     auto resultKind = findProtocolSelfReferences(proto, funcTy->getResult(),
                                                  skipAssocTypes);
 
@@ -3291,16 +3294,30 @@ void ProtocolDecl::computeRequirementSignature() {
                                   LookUpConformanceInModule(module));
   builder.addGenericParameter(selfType);
   auto selfPA =
-      builder.resolveArchetype(selfType,
-                               ArchetypeResolutionKind::CompleteWellFormed);
+      builder.resolveArchetype(selfType, ArchetypeResolutionKind::WellFormed);
 
   builder.addRequirement(
          requirement,
          GenericSignatureBuilder::RequirementSource
            ::forRequirementSignature(selfPA, this),
          nullptr);
-  
-  RequirementSignature = builder.computeGenericSignature(SourceLoc());
+
+  // Compute and record the signature.
+  auto requirementSig = builder.computeGenericSignature(SourceLoc());
+  RequirementSignature = requirementSig->getRequirements().data();
+  assert(RequirementSignature != nullptr);
+  NumRequirementsInSignature = requirementSig->getRequirements().size();
+}
+
+void ProtocolDecl::setRequirementSignature(ArrayRef<Requirement> requirements) {
+  assert(!RequirementSignature && "already computed requirement signature");
+  if (requirements.empty()) {
+    RequirementSignature = reinterpret_cast<Requirement *>(this + 1);
+    NumRequirementsInSignature = 0;
+  } else {
+    RequirementSignature = getASTContext().AllocateCopy(requirements).data();
+    NumRequirementsInSignature = requirements.size();
+  }
 }
 
 /// Returns the default witness for a requirement, or nullptr if there is
@@ -4113,25 +4130,27 @@ void VarDecl::emitLetToVarNoteIfSimple(DeclContext *UseDC) const {
   }
 }
 
-ParamDecl::ParamDecl(bool isLet,
-                     SourceLoc letVarInOutLoc, SourceLoc argumentNameLoc,
+ParamDecl::ParamDecl(Specifier specifier,
+                     SourceLoc specifierLoc, SourceLoc argumentNameLoc,
                      Identifier argumentName, SourceLoc parameterNameLoc,
                      Identifier parameterName, Type ty, DeclContext *dc)
-  : VarDecl(DeclKind::Param, /*IsStatic*/false, /*IsLet*/isLet,
+  : VarDecl(DeclKind::Param, /*IsStatic*/false, specifier,
             /*IsCaptureList*/false, parameterNameLoc, parameterName, ty, dc),
   ArgumentName(argumentName), ArgumentNameLoc(argumentNameLoc),
-  LetVarInOutLoc(letVarInOutLoc) {
+  SpecifierLoc(specifierLoc) {
+    assert(specifier != Specifier::Var &&
+           "'var' cannot appear on parameters; you meant 'inout'");
 }
 
 /// Clone constructor, allocates a new ParamDecl identical to the first.
 /// Intentionally not defined as a copy constructor to avoid accidental copies.
 ParamDecl::ParamDecl(ParamDecl *PD)
-  : VarDecl(DeclKind::Param, /*IsStatic*/false, /*IsLet*/PD->isLet(),
+  : VarDecl(DeclKind::Param, /*IsStatic*/false, PD->getSpecifier(),
             /*IsCaptureList*/false, PD->getNameLoc(), PD->getName(),
             PD->hasType() ? PD->getType() : Type(), PD->getDeclContext()),
     ArgumentName(PD->getArgumentName()),
     ArgumentNameLoc(PD->getArgumentNameLoc()),
-    LetVarInOutLoc(PD->getLetVarInOutLoc()),
+    SpecifierLoc(PD->getSpecifierLoc()),
     DefaultValueAndIsVariadic(nullptr, PD->DefaultValueAndIsVariadic.getInt()),
     IsTypeLocImplicit(PD->IsTypeLocImplicit),
     defaultArgumentKind(PD->defaultArgumentKind) {
@@ -4172,7 +4191,7 @@ Type DeclContext::getSelfInterfaceType() const {
 /// generic parameters.
 ParamDecl *ParamDecl::createUnboundSelf(SourceLoc loc, DeclContext *DC) {
   ASTContext &C = DC->getASTContext();
-  auto *selfDecl = new (C) ParamDecl(/*IsLet*/true, SourceLoc(), SourceLoc(),
+  auto *selfDecl = new (C) ParamDecl(VarDecl::Specifier::None, SourceLoc(), SourceLoc(),
                                      Identifier(), loc, C.Id_self, Type(), DC);
   selfDecl->setImplicit();
   return selfDecl;
@@ -4192,6 +4211,7 @@ ParamDecl *ParamDecl::createSelf(SourceLoc loc, DeclContext *DC,
   ASTContext &C = DC->getASTContext();
   auto selfType = DC->getSelfTypeInContext();
   auto selfInterfaceType = DC->getSelfInterfaceType();
+  auto specifier = VarDecl::Specifier::None;
   assert(selfType && selfInterfaceType);
 
   if (isStaticMethod) {
@@ -4202,9 +4222,10 @@ ParamDecl *ParamDecl::createSelf(SourceLoc loc, DeclContext *DC,
   if (isInOut) {
     selfType = InOutType::get(selfType);
     selfInterfaceType = InOutType::get(selfInterfaceType);
+    specifier = VarDecl::Specifier::InOut;
   }
 
-  auto *selfDecl = new (C) ParamDecl(/*IsLet*/!isInOut, SourceLoc(),SourceLoc(),
+  auto *selfDecl = new (C) ParamDecl(specifier, SourceLoc(),SourceLoc(),
                                      Identifier(), loc, C.Id_self, selfType,DC);
   selfDecl->setImplicit();
   selfDecl->setInterfaceType(selfInterfaceType);

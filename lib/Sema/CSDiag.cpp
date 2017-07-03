@@ -5305,22 +5305,43 @@ static bool diagnoseSingleCandidateFailures(CalleeCandidateInfo &CCI,
 
       SourceLoc diagLoc = firstRange.Start;
 
+      auto addFixIts = [&](InFlightDiagnostic diag) {
+        diag.highlight(firstRange).highlight(secondRange);
+
+        // Move the misplaced argument by removing it from one location and
+        // inserting it in another location. To maintain argument comma
+        // separation, since the argument is always moving to an earlier index
+        // the preceding comma and whitespace is removed and a new trailing
+        // comma and space is inserted with the moved argument.
+        auto &SM = TC.Context.SourceMgr;
+        auto text = SM.extractText(
+            Lexer::getCharSourceRangeFromSourceRange(SM, firstRange));
+
+        auto removalRange =
+            SourceRange(Lexer::getLocForEndOfToken(
+                            SM, tuple->getElement(argIdx - 1)->getEndLoc()),
+                        firstRange.End);
+        diag.fixItRemove(removalRange);
+        diag.fixItInsert(secondRange.Start, text.str() + ", ");
+      };
+
+      // There are 4 diagnostic messages variations depending on
+      // labeled/unlabeled arguments.
       if (first.empty() && second.empty()) {
-        TC.diagnose(diagLoc, diag::argument_out_of_order_unnamed_unnamed,
-                    argIdx + 1, prevArgIdx + 1)
-            .fixItExchange(firstRange, secondRange);
+        addFixIts(TC.diagnose(diagLoc,
+                              diag::argument_out_of_order_unnamed_unnamed,
+                              argIdx + 1, prevArgIdx + 1));
       } else if (first.empty() && !second.empty()) {
-        TC.diagnose(diagLoc, diag::argument_out_of_order_unnamed_named,
-                    argIdx + 1, second)
-            .fixItExchange(firstRange, secondRange);
+        addFixIts(TC.diagnose(diagLoc,
+                              diag::argument_out_of_order_unnamed_named,
+                              argIdx + 1, second));
       } else if (!first.empty() && second.empty()) {
-        TC.diagnose(diagLoc, diag::argument_out_of_order_named_unnamed, first,
-                    prevArgIdx + 1)
-            .fixItExchange(firstRange, secondRange);
+        addFixIts(TC.diagnose(diagLoc,
+                              diag::argument_out_of_order_named_unnamed, first,
+                              prevArgIdx + 1));
       } else {
-        TC.diagnose(diagLoc, diag::argument_out_of_order_named_named, first,
-                    second)
-            .fixItExchange(firstRange, secondRange);
+        addFixIts(TC.diagnose(diagLoc, diag::argument_out_of_order_named_named,
+                              first, second));
       }
 
       Diagnosed = true;
@@ -6157,28 +6178,30 @@ bool FailureDiagnosis::diagnoseTrailingClosureErrors(ApplyExpr *callExpr) {
       if (!fnType)
         return false;
 
-      auto expectedArgType = FunctionType::get(fnType->getInput(), resultType,
-                                               fnType->getExtInfo());
-
-      auto expectedType =
-          FunctionType::get(expectedArgType, CS->getContextualType());
-
       class ClosureCalleeListener : public ExprTypeCheckListener {
-        Type contextualType;
+        Type InputType;
+        Type ResultType;
 
       public:
-        explicit ClosureCalleeListener(Type contextualType)
-            : contextualType(contextualType) {}
+        explicit ClosureCalleeListener(Type inputType, Type resultType)
+            : InputType(inputType), ResultType(resultType) {}
 
         bool builtConstraints(ConstraintSystem &cs, Expr *expr) override {
+          if (!InputType || !ResultType)
+            return false;
+
+          auto expectedType = FunctionType::get(InputType, ResultType);
           cs.addConstraint(ConstraintKind::Conversion, cs.getType(expr),
-                           contextualType, cs.getConstraintLocator(expr),
+                           expectedType, cs.getConstraintLocator(expr),
                            /*isFavored*/ true);
           return false;
         }
       };
 
-      ClosureCalleeListener listener(expectedType);
+      auto expectedArgType = FunctionType::get(fnType->getInput(), resultType,
+                                               fnType->getExtInfo());
+
+      ClosureCalleeListener listener(expectedArgType, CS->getContextualType());
       return !typeCheckChildIndependently(callExpr->getFn(), Type(),
                                           CTP_CalleeResult, TCC_ForceRecheck,
                                           &listener);
@@ -6192,7 +6215,7 @@ bool FailureDiagnosis::diagnoseTrailingClosureErrors(ApplyExpr *callExpr) {
   return false;
 }
 
-/// Check if there failure associated with expresssion is related
+/// Check if there failure associated with expression is related
 /// to given contextual type.
 bool FailureDiagnosis::diagnoseCallContextualConversionErrors(
     ApplyExpr *callExpr, Type contextualType) {
@@ -7165,7 +7188,7 @@ bool FailureDiagnosis::diagnoseClosureExpr(
                        !resultType->hasTypeVariable();
               };
 
-              // If there an expected result type but it hasn't been explictly
+              // If there an expected result type but it hasn't been explicitly
               // provided, let's add it to the argument.
               if (hasResult(resultType) && !CE->hasExplicitResultType()) {
                 nameOS << " -> ";

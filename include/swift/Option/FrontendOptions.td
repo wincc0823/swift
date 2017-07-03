@@ -294,6 +294,9 @@ def disable_tsan_inout_instrumentation : Flag<["-"],
   "disable-tsan-inout-instrumentation">,
   HelpText<"Disable treatment of inout parameters as Thread Sanitizer accesses">;
 
+def report_errors_to_debugger : Flag<["-"], "report-errors-to-debugger">,
+  HelpText<"Invoke the debugger hook on fatalError calls">;
+
 def enable_infer_import_as_member :
   Flag<["-"], "enable-infer-import-as-member">,
   HelpText<"Infer when a global could be imported as a member">;
@@ -410,6 +413,9 @@ def verify_type_layout : JoinedOrSeparate<["-"], "verify-type-layout">,
 def external_pass_pipeline_filename : Separate<["-"], "external-pass-pipeline-filename">,
     HelpText<"Use the pass pipeline defined by <pass_pipeline_file>">,
     MetaVarName<"<pass_pipeline_file>">;
+
+def index_system_modules : Flag<["-"], "index-system-modules">,
+  HelpText<"Emit index data for imported serialized swift system modules">;
 
 def dump_interface_hash : Flag<["-"], "dump-interface-hash">,
    HelpText<"Parse input file(s) and dump interface token hash(es)">,

@@ -92,6 +92,17 @@ class TestJSONEncoder : TestJSONEncoderSuper {
     _testRoundTrip(of: employee)
   }
 
+  func testEncodingTopLevelNullableType() {
+    // EnhancedBool is a type which encodes either as a Bool or as nil.
+    _testEncodeFailure(of: EnhancedBool.true)
+    _testEncodeFailure(of: EnhancedBool.false)
+    _testEncodeFailure(of: EnhancedBool.fileNotFound)
+
+    _testRoundTrip(of: TopLevelWrapper(EnhancedBool.true), expectedJSON: "{\"value\":true}".data(using: .utf8)!)
+    _testRoundTrip(of: TopLevelWrapper(EnhancedBool.false), expectedJSON: "{\"value\":false}".data(using: .utf8)!)
+    _testRoundTrip(of: TopLevelWrapper(EnhancedBool.fileNotFound), expectedJSON: "{\"value\":null}".data(using: .utf8)!)
+  }
+
   // MARK: - Output Formatting Tests
   func testEncodingOutputFormattingDefault() {
     let expectedJSON = "{\"name\":\"Johnny Appleseed\",\"email\":\"appleseed@apple.com\"}".data(using: .utf8)!
@@ -397,27 +408,13 @@ class TestJSONEncoder : TestJSONEncoderSuper {
 }
 
 // MARK: - Helper Global Functions
-func expectEqualPaths(_ lhs: [CodingKey?], _ rhs: [CodingKey?], _ prefix: String) {
+func expectEqualPaths(_ lhs: [CodingKey], _ rhs: [CodingKey], _ prefix: String) {
   if lhs.count != rhs.count {
-    expectUnreachable("\(prefix) [CodingKey?].count mismatch: \(lhs.count) != \(rhs.count)")
+    expectUnreachable("\(prefix) [CodingKey].count mismatch: \(lhs.count) != \(rhs.count)")
     return
   }
 
-  for (k1, k2) in zip(lhs, rhs) {
-    switch (k1, k2) {
-    case (.none, .none): continue
-    case (.some(let _k1), .none):
-      expectUnreachable("\(prefix) CodingKey mismatch: \(type(of: _k1)) != nil")
-      return
-    case (.none, .some(let _k2)):
-      expectUnreachable("\(prefix) CodingKey mismatch: nil != \(type(of: _k2))")
-      return
-    default: break
-    }
-
-    let key1 = k1!
-    let key2 = k2!
-
+  for (key1, key2) in zip(lhs, rhs) {
     switch (key1.intValue, key2.intValue) {
     case (.none, .none): break
     case (.some(let i1), .none):
@@ -661,60 +658,29 @@ fileprivate struct Company : Codable, Equatable {
   }
 }
 
-// MARK: - Helper Types
-
-/// Wraps a type T so that it can be encoded at the top level of a payload.
-fileprivate struct TopLevelWrapper<T> : Codable, Equatable where T : Codable, T : Equatable {
-  let value: T
-
-  init(_ value: T) {
-    self.value = value
-  }
-
-  static func ==(_ lhs: TopLevelWrapper<T>, _ rhs: TopLevelWrapper<T>) -> Bool {
-    return lhs.value == rhs.value
-  }
-}
-
-fileprivate struct FloatNaNPlaceholder : Codable, Equatable {
-  init() {}
-
-  func encode(to encoder: Encoder) throws {
-    var container = encoder.singleValueContainer()
-    try container.encode(Float.nan)
-  }
+/// An enum type which decodes from Bool?.
+fileprivate enum EnhancedBool : Codable {
+  case `true`
+  case `false`
+  case fileNotFound
 
   init(from decoder: Decoder) throws {
     let container = try decoder.singleValueContainer()
-    let float = try container.decode(Float.self)
-    if !float.isNaN {
-      throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Couldn't decode NaN."))
+    if container.decodeNil() {
+      self = .fileNotFound
+    } else {
+      let value = try container.decode(Bool.self)
+      self = value ? .true : .false
     }
   }
-
-  static func ==(_ lhs: FloatNaNPlaceholder, _ rhs: FloatNaNPlaceholder) -> Bool {
-    return true
-  }
-}
-
-fileprivate struct DoubleNaNPlaceholder : Codable, Equatable {
-  init() {}
 
   func encode(to encoder: Encoder) throws {
     var container = encoder.singleValueContainer()
-    try container.encode(Double.nan)
-  }
-
-  init(from decoder: Decoder) throws {
-    let container = try decoder.singleValueContainer()
-    let double = try container.decode(Double.self)
-    if !double.isNaN {
-      throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Couldn't decode NaN."))
+    switch self {
+    case .true: try container.encode(true)
+    case .false: try container.encode(false)
+    case .fileNotFound: try container.encodeNil()
     }
-  }
-
-  static func ==(_ lhs: DoubleNaNPlaceholder, _ rhs: DoubleNaNPlaceholder) -> Bool {
-    return true
   }
 }
 
@@ -808,7 +774,7 @@ struct NestedContainersTestType : Encodable {
     }
   }
 
-  func _testNestedContainers(in encoder: Encoder, baseCodingPath: [CodingKey?]) {
+  func _testNestedContainers(in encoder: Encoder, baseCodingPath: [CodingKey]) {
     expectEqualPaths(encoder.codingPath, baseCodingPath, "New encoder has non-empty codingPath.")
 
     // codingPath should not change upon fetching a non-nested container.
@@ -842,25 +808,104 @@ struct NestedContainersTestType : Encodable {
     // Nested Unkeyed Container
     do {
       // Nested container for key should have a new key pushed on.
-      var secondLevelContainer = firstLevelContainer.nestedUnkeyedContainer(forKey: .a)
+      var secondLevelContainer = firstLevelContainer.nestedUnkeyedContainer(forKey: .b)
       expectEqualPaths(encoder.codingPath, baseCodingPath, "Top-level Encoder's codingPath changed.")
       expectEqualPaths(firstLevelContainer.codingPath, baseCodingPath, "First-level keyed container's codingPath changed.")
-      expectEqualPaths(secondLevelContainer.codingPath, baseCodingPath + [TopLevelCodingKeys.a], "New second-level keyed container had unexpected codingPath.")
+      expectEqualPaths(secondLevelContainer.codingPath, baseCodingPath + [TopLevelCodingKeys.b], "New second-level keyed container had unexpected codingPath.")
 
       // Appending a keyed container should not change existing coding paths.
       let thirdLevelContainerKeyed = secondLevelContainer.nestedContainer(keyedBy: IntermediateCodingKeys.self)
       expectEqualPaths(encoder.codingPath, baseCodingPath, "Top-level Encoder's codingPath changed.")
       expectEqualPaths(firstLevelContainer.codingPath, baseCodingPath, "First-level keyed container's codingPath changed.")
-      expectEqualPaths(secondLevelContainer.codingPath, baseCodingPath + [TopLevelCodingKeys.a], "Second-level unkeyed container's codingPath changed.")
-      expectEqualPaths(thirdLevelContainerKeyed.codingPath, baseCodingPath + [TopLevelCodingKeys.a, nil], "New third-level keyed container had unexpected codingPath.")
+      expectEqualPaths(secondLevelContainer.codingPath, baseCodingPath + [TopLevelCodingKeys.b], "Second-level unkeyed container's codingPath changed.")
+      expectEqualPaths(thirdLevelContainerKeyed.codingPath, baseCodingPath + [TopLevelCodingKeys.b, _TestKey(index: 0)], "New third-level keyed container had unexpected codingPath.")
 
       // Appending an unkeyed container should not change existing coding paths.
       let thirdLevelContainerUnkeyed = secondLevelContainer.nestedUnkeyedContainer()
       expectEqualPaths(encoder.codingPath, baseCodingPath, "Top-level Encoder's codingPath changed.")
       expectEqualPaths(firstLevelContainer.codingPath, baseCodingPath, "First-level keyed container's codingPath changed.")
-      expectEqualPaths(secondLevelContainer.codingPath, baseCodingPath + [TopLevelCodingKeys.a], "Second-level unkeyed container's codingPath changed.")
-      expectEqualPaths(thirdLevelContainerUnkeyed.codingPath, baseCodingPath + [TopLevelCodingKeys.a, nil], "New third-level unkeyed container had unexpected codingPath.")
+      expectEqualPaths(secondLevelContainer.codingPath, baseCodingPath + [TopLevelCodingKeys.b], "Second-level unkeyed container's codingPath changed.")
+      expectEqualPaths(thirdLevelContainerUnkeyed.codingPath, baseCodingPath + [TopLevelCodingKeys.b, _TestKey(index: 1)], "New third-level unkeyed container had unexpected codingPath.")
     }
+  }
+}
+
+// MARK: - Helper Types
+
+/// A key type which can take on any string or integer value.
+/// This needs to mirror _JSONKey.
+fileprivate struct _TestKey : CodingKey {
+  var stringValue: String
+  var intValue: Int?
+
+  init?(stringValue: String) {
+    self.stringValue = stringValue
+    self.intValue = nil
+  }
+
+  init?(intValue: Int) {
+    self.stringValue = "\(intValue)"
+    self.intValue = intValue
+  }
+
+  init(index: Int) {
+    self.stringValue = "Index \(index)"
+    self.intValue = index
+  }
+}
+
+/// Wraps a type T so that it can be encoded at the top level of a payload.
+fileprivate struct TopLevelWrapper<T> : Codable, Equatable where T : Codable, T : Equatable {
+  let value: T
+
+  init(_ value: T) {
+    self.value = value
+  }
+
+  static func ==(_ lhs: TopLevelWrapper<T>, _ rhs: TopLevelWrapper<T>) -> Bool {
+    return lhs.value == rhs.value
+  }
+}
+
+fileprivate struct FloatNaNPlaceholder : Codable, Equatable {
+  init() {}
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.singleValueContainer()
+    try container.encode(Float.nan)
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    let float = try container.decode(Float.self)
+    if !float.isNaN {
+      throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Couldn't decode NaN."))
+    }
+  }
+
+  static func ==(_ lhs: FloatNaNPlaceholder, _ rhs: FloatNaNPlaceholder) -> Bool {
+    return true
+  }
+}
+
+fileprivate struct DoubleNaNPlaceholder : Codable, Equatable {
+  init() {}
+
+  func encode(to encoder: Encoder) throws {
+    var container = encoder.singleValueContainer()
+    try container.encode(Double.nan)
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    let double = try container.decode(Double.self)
+    if !double.isNaN {
+      throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Couldn't decode NaN."))
+    }
+  }
+
+  static func ==(_ lhs: DoubleNaNPlaceholder, _ rhs: DoubleNaNPlaceholder) -> Bool {
+    return true
   }
 }
 
@@ -879,6 +924,7 @@ JSONEncoderTests.test("testEncodingTopLevelStructuredSingleStruct") { TestJSONEn
 JSONEncoderTests.test("testEncodingTopLevelStructuredSingleClass") { TestJSONEncoder().testEncodingTopLevelStructuredSingleClass() }
 JSONEncoderTests.test("testEncodingTopLevelDeepStructuredType") { TestJSONEncoder().testEncodingTopLevelDeepStructuredType()}
 JSONEncoderTests.test("testEncodingClassWhichSharesEncoderWithSuper") { TestJSONEncoder().testEncodingClassWhichSharesEncoderWithSuper() }
+JSONEncoderTests.test("testEncodingTopLevelNullableType") { TestJSONEncoder().testEncodingTopLevelNullableType() }
 JSONEncoderTests.test("testEncodingOutputFormattingDefault") { TestJSONEncoder().testEncodingOutputFormattingDefault() }
 JSONEncoderTests.test("testEncodingOutputFormattingPrettyPrinted") { TestJSONEncoder().testEncodingOutputFormattingPrettyPrinted() }
 JSONEncoderTests.test("testEncodingOutputFormattingSortedKeys") { TestJSONEncoder().testEncodingOutputFormattingSortedKeys() }
